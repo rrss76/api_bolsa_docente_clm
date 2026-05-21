@@ -1,0 +1,55 @@
+name: Scraper Bolsa Docente CLM
+
+on:
+  schedule:
+    - cron: "0,30 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
+
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Forzar re-descarga aunque ya existan los PDFs"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  lanzar-scraper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Llamar al endpoint de Render
+        id: trigger
+        run: |
+          HTTP_CODE=$(curl -s -o response.json -w "%{http_code}" \
+            -X POST https://api-bolsa-docente-clm.onrender.com/run-scraper \
+            -H "x-scraper-token: ${{ secrets.SCRAPER_TOKEN }}")
+
+          echo "HTTP status: $HTTP_CODE"
+          cat response.json
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            STATUS=$(cat response.json | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            echo "status=$STATUS" >> $GITHUB_OUTPUT
+            echo "✓ Respuesta: $STATUS"
+          elif [ "$HTTP_CODE" = "401" ]; then
+            echo "✗ Token inválido. Revisa el secret SCRAPER_TOKEN."
+            exit 1
+          else
+            echo "✗ Error inesperado (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+
+      - name: Resultado
+        run: |
+          STATUS="${{ steps.trigger.outputs.status }}"
+          if [ "$STATUS" = "iniciado" ]; then
+            echo "✅ Pipeline lanzado en Render correctamente."
+          elif [ "$STATUS" = "ya_en_ejecucion" ]; then
+            echo "⚠ El scraper ya estaba corriendo en Render. Se omite esta ejecución."
+          else
+            echo "ℹ Estado: $STATUS"
+          fi
