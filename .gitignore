@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Proyecto api_bolsa_docente_clm
+desktop.ini
+pdfs_descargados/
+csvs_generados/
+pdfs_nuevos.json
+estado_scraper.json
