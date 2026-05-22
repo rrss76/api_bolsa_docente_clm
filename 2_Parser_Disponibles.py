@@ -283,7 +283,26 @@ def parse_pdf(pdf_path: str) -> list[dict]:
 
     print(f"    → {len(todos)} aspirantes extraídos")
     return todos
+  
+import io
 
+def parse_pdf_bytes(pdf_bytes: bytes, nombre: str = "archivo.pdf") -> list[dict]:
+    """Igual que parse_pdf pero acepta bytes en lugar de ruta de fichero."""
+    estado = {
+        "cuerpo": "", "cod_cuerpo": "",
+        "especialidad": "", "cod_especialidad": "",
+        "fecha": "",
+    }
+    todos = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        validar_pdf(pdf, nombre)
+        total = len(pdf.pages)
+        for n, page in enumerate(pdf.pages, 1):
+            if n % 50 == 0 or n == total:
+                print(f"    Página {n}/{total}...")
+            todos.extend(parse_page(page, estado))
+    print(f"    → {len(todos)} aspirantes extraídos")
+    return todos
 
 # ---------------------------------------------------------------------------
 # Escritura del CSV
