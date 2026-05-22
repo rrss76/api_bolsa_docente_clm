@@ -64,7 +64,18 @@ def guardar_estado(estado: dict):
         json.dumps(estado, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
-
+  
+def descargar_pdf_bytes(url_pdf: str) -> tuple[bytes, str] | None:
+    """Descarga un PDF y devuelve (bytes, nombre) sin guardar en disco."""
+    from urllib.parse import unquote
+    nombre = unquote(Path(url_pdf.split("?")[0]).name)
+    try:
+        resp = requests.get(url_pdf, headers=HEADERS, timeout=60, stream=True)
+        resp.raise_for_status()
+        return resp.content, nombre
+    except Exception as e:
+        print(f"    ✗ Error descargando {nombre}: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Detección de adjudicaciones en portada
