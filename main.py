@@ -769,31 +769,115 @@ DB_BOLSA_PATH = os.getenv("DB_BOLSA_PATH", "Base_Bolsa_Docente.db")
 
 
 def _ejecutar_pipeline():
-    """
-    Ejecuta únicamente el scraper para descargar los PDFs.
-    El pipeline (carga en BD) está desactivado hasta que
-    se valide que los PDFs se descargan correctamente.
-    """
-    _scraper_log.info("▶ Iniciando scraper...")
-    res_scraper = subprocess.run(
-        ["python", "scraper.py", "--output-json", "pdfs_nuevos.json"],
-        capture_output=True, text=True
-    )
-    _scraper_log.info(res_scraper.stdout)
+    import importlib
+    import io
+    import json
+    import re
+    
+    parser_disp = importlib.import_module("2_Parser_Disponibles")
+    parser_adj  = importlib.import_module("3_Parser_adjudicaciones")
+    cargador    = importlib.import_module("3_Cargar_semana")
 
-    if res_scraper.returncode == 2:
+    _scraper_log.info("▶ Iniciando scraper en memoria...")
+
+    # 1. Detectar adjudicaciones en portada
+    from scraper import obtener_adjudicaciones_portada, extraer_pdfs_pagina, cargar_estado, guardar_estado, descargar_pdf_bytes, BASE_URL
+    
+    estado = cargar_estado()
+    adjudicaciones = obtener_adjudicaciones_portada()
+    
+    registros_disp = []
+    registros_adj  = []
+    hay_novedades  = False
+    fecha_raw      = ""
+
+    for adj in adjudicaciones:
+        pdfs_por_seccion = extraer_pdfs_pagina(adj["url"])
+
+        for seccion, pdfs in pdfs_por_seccion.items():
+            for pdf in pdfs:
+                clave_pdf = pdf["url"]
+                if clave_pdf in estado["pdfs_descargados"]:
+                    continue
+
+                resultado = descargar_pdf_bytes(pdf["url"])
+                if not resultado:
+                    continue
+
+                pdf_bytes, nombre = resultado
+                hay_novedades = True
+                estado["pdfs_descargados"].append(clave_pdf)
+
+                # Extraer fecha del nombre si no la tenemos
+                if not fecha_raw:
+                    m = re.search(r'(\d{8})', nombre.replace(' ', ''))
+                    if m:
+                        s = m.group(1)
+                        fecha_raw = f"{s[6:8]}/{s[4:6]}/{s[0:4]}"
+
+                _scraper_log.info(f"  ✓ {nombre}")
+
+                try:
+                    if seccion == "disponibles":
+                        registros_disp.extend(parser_disp.parse_pdf_bytes(pdf_bytes, nombre))
+                    elif seccion == "adjudicados":
+                        registros_adj.extend(parser_adj.parse_pdf_bytes(pdf_bytes, nombre))
+                except Exception as e:
+                    _scraper_log.error(f"  ✗ Error parseando {nombre}: {e}")
+
+    guardar_estado(estado)
+
+    if not hay_novedades:
         _scraper_log.info("✓ Sin novedades esta ejecución.")
         return
-    if res_scraper.returncode != 0:
-        _scraper_log.error(f"✗ Scraper falló:\n{res_scraper.stderr}")
+
+    _scraper_log.info(f"  → {len(registros_disp)} disponibles | {len(registros_adj)} adjudicaciones")
+
+    # 2. Normalizar fecha
+    if not fecha_raw:
+        _scraper_log.error("✗ No se pudo determinar la fecha.")
         return
 
-    _scraper_log.info("✅ PDFs descargados correctamente en pdfs_descargados/")
-    # Pipeline desactivado temporalmente — activar cuando se valide la descarga:
-    # res_pipeline = subprocess.run(
-    #     ["python", "pipeline.py", "--input", "pdfs_nuevos.json", "--db", DB_BOLSA_PATH],
-    #     capture_output=True, text=True
-    # )
+    for r in registros_disp:
+        if not r.get("fecha"):
+            r["fecha"] = fecha_raw
+    for r in registros_adj:
+        if not r.get("fecha_publicacion"):
+            r["fecha_publicacion"] = fecha_raw
+
+    # 3. Guardar CSVs temporales y cargar en BD
+    import csv, tempfile
+    from pathlib import Path
+
+    CAMPOS_DISP = ["fecha","cod_cuerpo","cuerpo","cod_especialidad","especialidad",
+                   "orden","dni","apellidos_nombre","tipo_bolsa","orden_bolsa",
+                   "provincias","ingles","frances","aleman","italiano"]
+    CAMPOS_ADJ  = ["fecha_publicacion","fecha_inicio_periodo","fecha_fin_periodo",
+                   "cod_cuerpo","cuerpo","cod_especialidad","especialidad",
+                   "cod_centro","nombre_centro","localidad","dni","apellidos_nombre",
+                   "titular","bolsa","posicion","tipo_jornada","fecha_inicio","fecha_fin"]
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8', newline='') as f_disp:
+        writer = csv.DictWriter(f_disp, fieldnames=CAMPOS_DISP, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(registros_disp)
+        path_disp = f_disp.name
+
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8', newline='') as f_adj:
+        writer = csv.DictWriter(f_adj, fieldnames=CAMPOS_ADJ, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(registros_adj)
+        path_adj = f_adj.name
+
+    try:
+        _scraper_log.info("▶ Cargando en base de datos...")
+        cargador.procesar(Path(path_disp), Path(path_adj), Path(DB_BOLSA_PATH))
+        _scraper_log.info("✅ Pipeline completado correctamente.")
+    except Exception as e:
+        _scraper_log.error(f"✗ Error en cargador: {e}")
+    finally:
+        Path(path_disp).unlink(missing_ok=True)
+        Path(path_adj).unlink(missing_ok=True)
 
 
 @app.post("/run-scraper")
