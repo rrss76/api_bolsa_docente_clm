@@ -776,7 +776,7 @@ def _ejecutar_pipeline():
     
     parser_disp = importlib.import_module("2_Parser_Disponibles")
     parser_adj  = importlib.import_module("3_Parser_adjudicaciones")
-    cargador    = importlib.import_module("3_Cargar_semana")
+    cargador    = importlib.import_module("4_Cargador_Semanal")
 
     _scraper_log.info("▶ Iniciando scraper en memoria...")
 
