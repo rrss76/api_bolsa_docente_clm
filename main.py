@@ -8,7 +8,7 @@ from datetime import datetime
 import re
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Tuple
-import os  # === APP META (NUEVO) ===
+import os
 import requests as _requests
 import subprocess
 import threading
@@ -16,9 +16,17 @@ import logging
 
 app = FastAPI(title="API Interinos CLM")
 
-DB_PATH = "Base_interinos_2025.db"
+DB_PATH = "Base_Bolsa_Docente.db"
 
-# Permitir todas las peticiones desde cualquier origen (útil para pruebas)
+# Tabla de la bolsa inicial (inicio de curso, cuerpo 597)
+TABLA_BOLSA_INICIAL = "bolsas_2025_597"
+
+# Tabla de adjudicaciones
+TABLA_ADJUDICACIONES = "adjudicaciones_2025_2026"
+
+# Tabla de disponibles semanales
+TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2025_2026"
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,16 +35,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# === APP META (NUEVO) ===
+# === APP META ===
 def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip() or default
 
 def get_app_meta_dict():
-    """
-    Metadatos de versión que la app consulta al inicio para decidir si
-    muestra un banner o fuerza actualización. Se leen de variables
-    de entorno para no tocar código en cada release.
-    """
     return {
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "android": {
@@ -68,16 +71,96 @@ def get_app_meta_dict():
 @app.get("/app_meta")
 def app_meta():
     return get_app_meta_dict()
-# === /APP META (NUEVO) ===
+# === /APP META ===
 
+
+# ─────────────────────────────────────────────
+# HELPERS GENERALES
+# ─────────────────────────────────────────────
 
 def normalizar_nombre(nombre):
+    """Elimina tildes y pasa a mayúsculas."""
     if not nombre:
         return ""
     nfkd = unicodedata.normalize('NFKD', nombre)
     sin_tildes = ''.join([c for c in nfkd if not unicodedata.combining(c)])
     return sin_tildes.upper()
 
+
+PROV_MAP = {
+    "02": "Albacete",
+    "13": "Ciudad Real",
+    "16": "Cuenca",
+    "19": "Guadalajara",
+    "45": "Toledo",
+}
+ALLOWED_PROV = set(PROV_MAP.keys())
+
+
+def _split_especialidades(s: str):
+    if pd.isna(s) or not str(s).strip():
+        return []
+    return re.findall(r"\d{3}", str(s))
+
+
+def _split_provincias(s: str):
+    if pd.isna(s) or not str(s).strip():
+        return []
+    s = re.sub(r"[;/\s]+", ",", str(s))
+    out, seen = [], set()
+    for p in s.split(","):
+        p = re.sub(r"\D", "", p)
+        if len(p) == 1: p = p.zfill(2)
+        elif len(p) > 2: p = p[-2:]
+        if p in ALLOWED_PROV and p not in seen:
+            seen.add(p); out.append(p)
+    return out
+
+
+def _posicion_en(df_sorted, nombre_norm: str):
+    tmp = df_sorted.reset_index(drop=True)
+    ix = tmp.index[tmp["nombre_normalizado"] == nombre_norm]
+    return int(ix[0]) + 1 if len(ix) else None
+
+
+def _es_si(series):
+    return series.astype(str).str.strip().str.upper().isin(["S", "1", "TRUE", "SI", "YES"])
+
+
+def _add_nombre_normalizado(df: pd.DataFrame) -> pd.DataFrame:
+    """Añade columna nombre_normalizado si no existe (tablas semanales/adjudicaciones)."""
+    if "nombre_normalizado" not in df.columns:
+        df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
+    return df
+
+
+def _nombre_tabla_interinos(fecha_str: str) -> str:
+    """
+    Dado 'YYYY-MM-DD' devuelve el nombre de tabla interinos_YYYYMMDD.
+    Ejemplo: '2025-09-05' -> 'interinos_20250905'
+    """
+    try:
+        dt = datetime.strptime(fecha_str, "%Y-%m-%d")
+        return f"interinos_{dt.strftime('%Y%m%d')}"
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
+
+
+def _tablas_interinos_disponibles(conn) -> list:
+    """Devuelve todos los nombres de tabla que siguen el patrón interinos_YYYYMMDD."""
+    tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
+    patron = re.compile(r"^interinos_(\d{8})$")
+    resultado = []
+    for nombre in tablas["name"]:
+        m = patron.match(nombre)
+        if m:
+            resultado.append((nombre, m.group(1)))  # (tabla, YYYYMMDD)
+    return resultado
+
+
+# ─────────────────────────────────────────────
+# ENDPOINTS BÁSICOS
+# ─────────────────────────────────────────────
 
 @app.get("/")
 def read_root():
@@ -86,33 +169,37 @@ def read_root():
 
 @app.get("/interinos")
 def get_nombres_normalizados():
+    """Lista de nombres distintos de la bolsa inicial (597)."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT DISTINCT nombre FROM disponibles_inicio_curso_597", conn)
+        df = pd.read_sql_query(f"SELECT DISTINCT nombre FROM {TABLA_BOLSA_INICIAL}", conn)
     nombres = df["nombre"].dropna().sort_values().tolist()
     return [{"nombre": n} for n in nombres]
 
 
 @app.get("/adjudicaciones")
 def obtener_adjudicaciones(nombre: str):
+    """Devuelve todas las adjudicaciones que contienen el nombre indicado."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM adjudicaciones_total", conn)
+        df = pd.read_sql_query(f"SELECT * FROM {TABLA_ADJUDICACIONES}", conn)
 
+    df = _add_nombre_normalizado(df)
     nombre_norm = normalizar_nombre(nombre)
-    df_filtrado = df[df["nombre_normalizado"].str.contains(nombre_norm)]
+    df_filtrado = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
 
     if df_filtrado.empty:
         return {"adjudicaciones": []}
 
-    return {"adjudicaciones": df_filtrado.to_dict(orient="records")}
+    return {"adjudicaciones": df_filtrado.drop(columns=["nombre_normalizado"]).to_dict(orient="records")}
 
 
 @app.get("/buscar_nombre")
 def buscar_nombre(query: str = Query(...)):
+    """Búsqueda de nombre con orden_bolsa para autocompletado."""
     qnorm = normalizar_nombre(query)
 
     with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
-            "SELECT nombre, orden_bolsa FROM disponibles_inicio_curso_597;",
+            f"SELECT nombre, orden_bolsa FROM {TABLA_BOLSA_INICIAL};",
             conn
         )
 
@@ -136,24 +223,33 @@ def buscar_nombre(query: str = Query(...)):
 
 @app.get("/fechas_disponibles")
 def fechas_disponibles():
+    """
+    Devuelve las fechas disponibles:
+      - 'inicio': la bolsa inicial (bolsas_2025_597)
+      - Fechas YYYY-MM-DD de las tablas interinos_YYYYMMDD
+    """
     with sqlite3.connect(DB_PATH) as conn:
-        tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
-        fechas = []
-        for tabla in tablas["name"]:
-            match = re.fullmatch(r"disponibles_(\d{4})_(\d{2})_(\d{2})", tabla)
-            if match:
-                fechas.append(f"{match.group(1)}-{match.group(2)}-{match.group(3)}")
-            if tabla == "disponibles_inicio_curso_597":
-                fechas.append("inicio")
+        tablas_interinos = _tablas_interinos_disponibles(conn)
+
+    fechas = ["inicio"]
+    for _, yyyymmdd in tablas_interinos:
+        try:
+            dt = datetime.strptime(yyyymmdd, "%Y%m%d")
+            fechas.append(dt.strftime("%Y-%m-%d"))
+        except ValueError:
+            pass
+
     return sorted(fechas)
 
 
 @app.get("/datos_interino")
 def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino")):
+    """Datos de puntuación e idiomas de un interino en la bolsa inicial."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM disponibles_inicio_curso_597", conn)
+        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
 
     nombre_busqueda = normalizar_nombre(nombre)
+    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     coincidencias = df[df["nombre_normalizado"].str.contains(nombre_busqueda, case=False, na=False)]
 
     if coincidencias.empty:
@@ -161,8 +257,10 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 
     columnas_deseadas = [
         "nombre", "puntos_total", "puntos_apd1", "puntos_apd2", "puntos_apd3",
-        "especialidades", "aleman", "frances", "ingles", "italiano", "lengua_signos"
+        "especialidades", "aleman", "frances", "ingles", "italiano", "leng_signos"
     ]
+    # Filtrar solo las que existen en el df (por si alguna falta)
+    columnas_deseadas = [c for c in columnas_deseadas if c in coincidencias.columns]
     datos_filtrados = coincidencias[columnas_deseadas].fillna("")
     return {
         "resultados": datos_filtrados.to_dict(orient="records"),
@@ -172,21 +270,26 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 
 @app.get("/ceses_previstos")
 def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
-    with sqlite3.connect("Base_interinos_2025.db") as conn:
+    """Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado."""
+    with sqlite3.connect(DB_PATH) as conn:
         df = pd.read_sql_query(
-            """
+            f"""
             SELECT *
-            FROM adjudicaciones_total
-            WHERE fecha_fin BETWEEN ? AND ?
+            FROM {TABLA_ADJUDICACIONES}
+            WHERE fecha_adjudicacion BETWEEN ? AND ?
             """,
             conn,
             params=(desde, hasta)
         )
-        return {
-            "total": len(df),
-            "ceses": df.to_dict(orient="records")
-        }
+    return {
+        "total": len(df),
+        "ceses": df.to_dict(orient="records")
+    }
 
+
+# ─────────────────────────────────────────────
+# POSICIÓN INICIAL (bolsa de inicio de curso)
+# ─────────────────────────────────────────────
 
 @app.get("/posicion_inicial")
 def posicion_inicial(
@@ -194,9 +297,10 @@ def posicion_inicial(
 ):
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            df = pd.read_sql_query("SELECT * FROM disponibles_inicio_curso_597", conn)
+            df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
 
-        nombre_busqueda = nombre.strip().upper()
+        df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
+        nombre_busqueda = normalizar_nombre(nombre)
 
         df_nombre = df[df["nombre_normalizado"].str.contains(nombre_busqueda, na=False)]
 
@@ -215,8 +319,8 @@ def posicion_inicial(
             pos_general = df_bolsa_ordenada[df_bolsa_ordenada["nombre_normalizado"] == nombre_normalizado].index
             posicion_general = int(pos_general[0] + 1) if not pos_general.empty else None
 
-            especialidades_str = fila["especialidades"]
-            especialidades = [e.strip() for e in especialidades_str.split(",") if e.strip().isdigit()]
+            especialidades_str = str(fila.get("especialidades", "") or "")
+            especialidades = _split_especialidades(especialidades_str)
 
             posiciones_especialidad = []
 
@@ -228,14 +332,16 @@ def posicion_inicial(
                 pos_esp = df_esp[df_esp["nombre_normalizado"] == nombre_normalizado].index
                 if not pos_esp.empty:
                     pos_idx = pos_esp[0]
-
                     personas_antes = df_esp.iloc[:pos_idx]
 
-                    idiomas = ["aleman", "frances", "ingles", "italiano", "lengua_signos"]
-                    personas_con_idiomas = {
-                        idioma: int(personas_antes[personas_antes[idioma] == "S"].shape[0])
-                        for idioma in idiomas
-                    }
+                    idiomas = ["aleman", "frances", "ingles", "italiano", "leng_signos"]
+                    personas_con_idiomas = {}
+                    for idioma in idiomas:
+                        col = idioma
+                        if col in personas_antes.columns:
+                            personas_con_idiomas[idioma] = int(personas_antes[personas_antes[col] == "S"].shape[0])
+                        else:
+                            personas_con_idiomas[idioma] = 0
 
                     posiciones_especialidad.append({
                         "especialidad": esp,
@@ -257,13 +363,19 @@ def posicion_inicial(
         return {"error": str(e)}
 
 
+# ─────────────────────────────────────────────
+# POSICIÓN EN DISPONIBLES (semana concreta)
+# ─────────────────────────────────────────────
+
 @app.get("/posicion_disponibles")
 def posicion_disponibles(nombre: str = Query(..., description="Nombre del interino")):
+    """Posición del interino en la bolsa inicial, desglosada por provincia."""
     nombre = normalizar_nombre(nombre)
 
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM disponibles_inicio_curso_597", conn)
+        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
 
+    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
     df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
 
@@ -277,16 +389,15 @@ def posicion_disponibles(nombre: str = Query(..., description="Nombre del interi
     for _, row in df_filtrado.iterrows():
         nombre_interino = row["nombre"]
         nombre_normalizado = row["nombre_normalizado"]
-        orden_interino = row["orden_bolsa"]
 
         especialidades = str(row["especialidades"]).split(",")
-        provincias = str(row["provincias"]).split(",")
+        provincias = _split_provincias(str(row.get("provincias", "") or ""))
 
         posicion_general = df[df["nombre_normalizado"] == nombre_normalizado].index[0] + 1
 
         posiciones_por_provincia = []
         for provincia in provincias:
-            df_prov = df[df["provincias"].str.contains(provincia, na=False)]
+            df_prov = df[df["provincias"].fillna("").str.contains(provincia, na=False)]
             df_prov = df_prov.sort_values(by="orden_bolsa").reset_index(drop=True)
 
             if nombre_normalizado in df_prov["nombre_normalizado"].values:
@@ -316,8 +427,9 @@ def posicion_disponibles_especialidad(
     nombre = normalizar_nombre(nombre)
 
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query("SELECT * FROM disponibles_inicio_curso_597", conn)
+        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
 
+    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
     df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
 
@@ -331,25 +443,25 @@ def posicion_disponibles_especialidad(
     for _, row in df_filtrado.iterrows():
         nombre_interino = row["nombre"]
         nombre_normalizado = row["nombre_normalizado"]
-        especialidades = str(row["especialidades"]).split(",")
-        provincias = str(row["provincias"]).split(",")
+        especialidades = _split_especialidades(str(row.get("especialidades", "") or ""))
+        provincias = _split_provincias(str(row.get("provincias", "") or ""))
 
         if especialidad not in especialidades:
             continue
 
         posicion_general = df[df["nombre_normalizado"] == nombre_normalizado].index[0] + 1
 
-        df_esp = df[df["especialidades"].str.contains(especialidad, na=False)]
+        df_esp = df[df["especialidades"].fillna("").str.contains(especialidad, na=False)]
         df_esp = df_esp.sort_values(by="orden_bolsa").reset_index(drop=True)
 
-        if nombre_normalizado in df_esp["nombre_normalizado"].values:
-            posicion_en_especialidad = df_esp[df_esp["nombre_normalizado"] == nombre_normalizado].index[0] + 1
-        else:
-            posicion_en_especialidad = None
+        posicion_en_especialidad = (
+            df_esp[df_esp["nombre_normalizado"] == nombre_normalizado].index[0] + 1
+            if nombre_normalizado in df_esp["nombre_normalizado"].values else None
+        )
 
         posiciones_por_provincia = []
         for provincia in provincias:
-            df_prov = df_esp[df_esp["provincias"].str.contains(provincia, na=False)]
+            df_prov = df_esp[df_esp["provincias"].fillna("").str.contains(provincia, na=False)]
             df_prov = df_prov.sort_values(by="orden_bolsa").reset_index(drop=True)
 
             if nombre_normalizado in df_prov["nombre_normalizado"].values:
@@ -376,67 +488,50 @@ def posicion_disponibles_especialidad(
     return {"resultados": resultados}
 
 
-PROV_MAP = {
-    "02": "Albacete",
-    "13": "Ciudad Real",
-    "16": "Cuenca",
-    "19": "Guadalajara",
-    "45": "Toledo",
-}
-ALLOWED_PROV = set(PROV_MAP.keys())
-
-def _split_especialidades(s: str):
-    if pd.isna(s) or not str(s).strip():
-        return []
-    return re.findall(r"\d{3}", str(s))
-
-def _split_provincias(s: str):
-    if pd.isna(s) or not str(s).strip():
-        return []
-    s = re.sub(r"[;/\s]+", ",", str(s))
-    out, seen = [], set()
-    for p in s.split(","):
-        p = re.sub(r"\D", "", p)
-        if len(p) == 1: p = p.zfill(2)
-        elif len(p) > 2: p = p[-2:]
-        if p in ALLOWED_PROV and p not in seen:
-            seen.add(p); out.append(p)
-    return out
-
-def _posicion_en(df_sorted, nombre_norm: str):
-    tmp = df_sorted.reset_index(drop=True)
-    ix = tmp.index[tmp["nombre_normalizado"] == nombre_norm]
-    return int(ix[0]) + 1 if len(ix) else None
-
+# ─────────────────────────────────────────────
+# POSICIÓN EN FECHA  (tablas interinos_YYYYMMDD)
+# ─────────────────────────────────────────────
 
 @app.get("/posicion_en_fecha")
 def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
+    """
+    Devuelve la posición de un interino en una fecha concreta.
+
+    - fecha='inicio'  → usa la bolsa inicial (bolsas_2025_597)
+    - fecha='YYYY-MM-DD' → busca la tabla interinos_YYYYMMDD
+    """
     try:
         if fecha.lower() == "inicio":
-            tabla = "disponibles_inicio_curso_597"
-        elif fecha.lower() == "admitidos":
-            tabla = "admitidos_sin_provincias"
+            tabla = TABLA_BOLSA_INICIAL
+            es_tabla_bolsa = True
         else:
-            try:
-                fecha_dt = datetime.strptime(fecha, "%Y-%m-%d")
-                tabla = f"disponibles_{fecha_dt.strftime('%Y_%m_%d')}"
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD o 'inicio' o 'admitidos'.")
+            tabla = _nombre_tabla_interinos(fecha)
+            es_tabla_bolsa = False
 
         with sqlite3.connect(DB_PATH) as conn:
-            try:
-                df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
-            except Exception:
-                raise HTTPException(status_code=404, detail=f"No se pudo leer la tabla '{tabla}'.")
+            # Verificar que la tabla existe
+            chk = pd.read_sql_query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                conn, params=[tabla]
+            )
+            if chk.empty:
+                raise HTTPException(status_code=404, detail=f"No existe datos para la fecha '{fecha}'.")
+
+            df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
 
         if df.empty:
-            raise HTTPException(status_code=404, detail=f"La tabla '{tabla}' está vacía o no existe.")
-        if "orden_bolsa" not in df.columns or "nombre_normalizado" not in df.columns:
-            raise HTTPException(status_code=400, detail=f"La tabla '{tabla}' no tiene columnas clave requeridas.")
+            raise HTTPException(status_code=404, detail=f"La tabla '{tabla}' está vacía.")
 
+        if "orden_bolsa" not in df.columns:
+            raise HTTPException(status_code=400, detail=f"La tabla '{tabla}' no tiene la columna 'orden_bolsa'.")
+
+        df = _add_nombre_normalizado(df)
         df["orden_bolsa"] = pd.to_numeric(df["orden_bolsa"], errors="coerce")
-        df["especialidades"] = df.get("especialidades", "").fillna("")
-        for col in ["aleman","frances","ingles","italiano","lengua_signos"]:
+        df["especialidades"] = df.get("especialidades", pd.Series([""] * len(df))).fillna("")
+
+        # Idiomas: en bolsa inicial es leng_signos, en interinos_YYYYMMDD puede variar
+        idiomas_cols = ["aleman", "frances", "ingles", "italiano", "leng_signos"]
+        for col in idiomas_cols:
             if col not in df.columns:
                 df[col] = ""
 
@@ -453,24 +548,22 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
         nombre_norm = normalizar_nombre(nombre)
         coincidencias = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
+
         if coincidencias.empty:
             raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
         cols_keep = [
             "nombre", "nombre_normalizado", "orden_bolsa",
             "especialidades_list", "especialidades_list_full",
-            "provincias_list", "aleman", "frances", "ingles", "italiano", "lengua_signos"
+            "provincias_list", "aleman", "frances", "ingles", "italiano", "leng_signos"
         ]
         for c in cols_keep:
             if c not in df.columns:
-                df[c] = "" if c not in ("orden_bolsa","especialidades_list","especialidades_list_full","provincias_list") else df[c]
+                df[c] = ""
 
         df_exp = df[cols_keep].explode("especialidades_list", ignore_index=True)
         df_exp = df_exp.rename(columns={"especialidades_list": "esp"})
         df_exp = df_exp[df_exp["esp"].notna()]
-
-        def _es_si(series):
-            return series.astype(str).str.strip().str.upper().isin(["S","1","TRUE","SI","YES"])
 
         resultados = []
 
@@ -490,9 +583,9 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
 
                 personas_antes = df_esp.reset_index(drop=True).iloc[:max((pos_esp or 1) - 1, 0)]
 
-                idiomas_cols = ["aleman", "frances", "ingles", "italiano", "lengua_signos"]
                 personas_con_idiomas = {
-                    idioma: int(personas_antes[_es_si(personas_antes[idioma])].shape[0]) if idioma in personas_antes.columns else 0
+                    idioma: int(personas_antes[_es_si(personas_antes[idioma])].shape[0])
+                    if idioma in personas_antes.columns else 0
                     for idioma in idiomas_cols
                 }
 
@@ -509,16 +602,18 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
                 por_provincia = []
                 if has_provincias and prov_list_interino:
                     for cod in prov_list_interino:
-                        df_esp_prov = df_esp[df_esp["provincias_list"].apply(lambda lst: isinstance(lst, list) and cod in lst)]
-                        df_esp_prov = df_esp_prov.sort_values("orden_bolsa")
+                        df_esp_prov = df_esp[
+                            df_esp["provincias_list"].apply(lambda lst: isinstance(lst, list) and cod in lst)
+                        ].sort_values("orden_bolsa")
 
                         pos_esp_prov = _posicion_en(df_esp_prov, nom_norm_i)
                         total_esp_prov = int(len(df_esp_prov))
 
-                        if pos_esp_prov is not None and pos_esp_prov > 1:
-                            personas_antes_prov = df_esp_prov.reset_index(drop=True).iloc[:pos_esp_prov - 1]
-                        else:
-                            personas_antes_prov = df_esp_prov.iloc[0:0]
+                        personas_antes_prov = (
+                            df_esp_prov.reset_index(drop=True).iloc[:pos_esp_prov - 1]
+                            if pos_esp_prov and pos_esp_prov > 1
+                            else df_esp_prov.iloc[0:0]
+                        )
 
                         def solo_esta_prov(lst):
                             return isinstance(lst, list) and len(lst) == 1 and lst[0] == cod
@@ -568,126 +663,110 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# === Helper NUEVO para endpoint de no disponibles ===
-def _tabla_disponibles_from_date_strict(fecha: str) -> str:
-    """
-    Convierte 'YYYY-MM-DD' en 'disponibles_YYYY_MM_DD'.
-    Este helper SOLO admite fechas semanales (no 'inicio' ni 'admitidos').
-    """
-    if not isinstance(fecha, str):
-        raise HTTPException(status_code=400, detail="La fecha debe ser una cadena 'YYYY-MM-DD'.")
-    if fecha.lower() in ("inicio", "admitidos"):
-        raise HTTPException(status_code=400, detail="Para este endpoint necesitas una fecha semanal (YYYY-MM-DD).")
-    try:
-        dt = datetime.strptime(fecha, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
-    return f"disponibles_{dt.strftime('%Y_%m_%d')}"
+# ─────────────────────────────────────────────
+# NO DISPONIBLES POR DELANTE
+# ─────────────────────────────────────────────
 
-
-# === NUEVO ENDPOINT: No Disponibles por delante ===
 @app.get("/no_disponibles_adelante")
 def no_disponibles_adelante(
     nombre: str = Query(..., description="Nombre del aspirante (se normaliza internamente)"),
-    fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD' de las tablas de disponibles")
+    fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD'")
 ):
     """
     Devuelve:
-      - Tu posición ese día en la lista semanal (si estás en esa lista).
+      - Tu posición ese día en la lista semanal de disponibles (si estás en ella).
       - Los 'No Disponibles' por delante de ti:
-          Estaban en la lista inicial (disponibles_inicio_curso_597),
-          NO están en la lista semanal de esa fecha,
-          y NO aparecen en 'adjudicaciones_total' (independientemente de la fecha).
+          Estaban en la bolsa inicial (bolsas_2025_597),
+          NO están en la lista de disponibles de esa semana (disponibles_semanales_2025_2026),
+          y NO aparecen en adjudicaciones_2025_2026.
       - Resumen (conteo) por especialidad de esos no disponibles por delante.
     """
     nombre_norm = normalizar_nombre(nombre)
-    tabla_semana = _tabla_disponibles_from_date_strict(fecha)  # valida y forma: disponibles_YYYY_MM_DD
+
+    # Validar formato fecha
+    try:
+        datetime.strptime(fecha, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
+
+    # La fecha en disponibles_semanales está en formato DD/MM/YYYY
+    try:
+        dt = datetime.strptime(fecha, "%Y-%m-%d")
+        fecha_bd = dt.strftime("%d/%m/%Y")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="No se pudo convertir la fecha.")
 
     with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
 
-        # 1) Verificar tabla semanal
+        # 1) Verificar que existe esa fecha en disponibles_semanales
         chk = pd.read_sql_query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            conn, params=[tabla_semana]
+            f"SELECT COUNT(*) as cnt FROM {TABLA_DISPONIBLES_SEMANALES} WHERE fecha=?",
+            conn, params=[fecha_bd]
         )
-        if chk.empty:
-            raise HTTPException(status_code=404, detail=f"No existe la tabla semanal '{tabla_semana}'.")
+        if chk["cnt"].iloc[0] == 0:
+            raise HTTPException(status_code=404, detail=f"No hay datos de disponibles para la fecha '{fecha}'.")
 
-        # 2) Cargar lista inicial y localizar al usuario
+        # 2) Cargar bolsa inicial y localizar al usuario
         df_ini = pd.read_sql_query(
-            "SELECT nombre, nombre_normalizado, orden_bolsa, especialidades FROM disponibles_inicio_curso_597",
+            f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades FROM {TABLA_BOLSA_INICIAL}",
             conn
         )
         if df_ini.empty:
-            raise HTTPException(status_code=404, detail="La tabla 'disponibles_inicio_curso_597' está vacía.")
+            raise HTTPException(status_code=404, detail=f"La tabla '{TABLA_BOLSA_INICIAL}' está vacía.")
 
         df_ini["orden_bolsa"] = pd.to_numeric(df_ini["orden_bolsa"], errors="coerce")
         cand = df_ini[df_ini["nombre_normalizado"].str.contains(nombre_norm, na=False)]
         if cand.empty:
-            raise HTTPException(status_code=404, detail="No se encontró el aspirante en la lista inicial.")
+            raise HTTPException(status_code=404, detail="No se encontró el aspirante en la bolsa inicial.")
 
         # Si hay homónimos, tomar el de menor orden_bolsa
         cand = cand.sort_values(["orden_bolsa", "nombre_normalizado"]).reset_index(drop=True)
         user_row = cand.iloc[0]
-        user_nom_norm = str(user_row["nombre_normalizado"])
+        user_nom_norm    = str(user_row["nombre_normalizado"])
         user_nom_display = str(user_row.get("nombre", user_nom_norm))
-        user_orden = int(user_row["orden_bolsa"]) if pd.notna(user_row["orden_bolsa"]) else None
-        user_esps = str(user_row.get("especialidades", "") or "")
+        user_orden       = int(user_row["orden_bolsa"]) if pd.notna(user_row["orden_bolsa"]) else None
+        user_esps        = str(user_row.get("especialidades", "") or "")
 
         if user_orden is None:
-            raise HTTPException(status_code=400, detail="El aspirante no tiene 'orden_bolsa' válido en la lista inicial.")
+            raise HTTPException(status_code=400, detail="El aspirante no tiene 'orden_bolsa' válido en la bolsa inicial.")
 
-        # 3) Posición del usuario en la lista semanal (si está)
+        # 3) Posición del usuario en los disponibles de esa semana (si está)
         df_sem = pd.read_sql_query(
-            f"SELECT nombre_normalizado, orden_bolsa FROM {tabla_semana}",
-            conn
+            f"SELECT nombre, orden_bolsa FROM {TABLA_DISPONIBLES_SEMANALES} WHERE fecha=?",
+            conn, params=[fecha_bd]
         )
-        if df_sem.empty:
-            raise HTTPException(status_code=404, detail=f"La tabla '{tabla_semana}' está vacía.")
-
+        df_sem = _add_nombre_normalizado(df_sem)
         df_sem["orden_bolsa"] = pd.to_numeric(df_sem["orden_bolsa"], errors="coerce")
         df_sem = df_sem.dropna(subset=["orden_bolsa"]).sort_values("orden_bolsa").reset_index(drop=True)
 
         idxs_user = df_sem.index[df_sem["nombre_normalizado"] == user_nom_norm]
-        posicion_semana = int(idxs_user[0] + 1) if len(idxs_user) else None  # puede no estar esa semana
+        posicion_semana = int(idxs_user[0] + 1) if len(idxs_user) else None
 
         # 4) Calcular 'No Disponibles' por delante
-        #    NOTA: aquí excluimos a TODOS los que aparecen en adjudicaciones_total, sin importar fechas
-        q_no_disp = f"""
-            WITH base AS (
-                SELECT nombre_normalizado, orden_bolsa, especialidades
-                FROM disponibles_inicio_curso_597
-            ),
-            dispo_sem AS (
-                SELECT DISTINCT nombre_normalizado FROM {tabla_semana}
-            ),
-            adjudicados AS (
-                SELECT DISTINCT nombre_normalizado
-                FROM adjudicaciones_total
-            ),
-            no_disponibles AS (
-                SELECT b.*
-                FROM base b
-                WHERE b.nombre_normalizado NOT IN (SELECT nombre_normalizado FROM dispo_sem)
-                  AND b.nombre_normalizado NOT IN (SELECT nombre_normalizado FROM adjudicados)
-            )
-            SELECT *
-            FROM no_disponibles
-            WHERE CAST(orden_bolsa AS INTEGER) < ?
-            ORDER BY CAST(orden_bolsa AS INTEGER) ASC
-        """
-        df_no_ahead = pd.read_sql_query(q_no_disp, conn, params=[user_orden])
+        #    - En bolsa inicial con orden < user_orden
+        #    - NO en disponibles de esa semana
+        #    - NO en adjudicaciones (sin importar fecha)
+        nombres_disponibles = set(df_sem["nombre_normalizado"].tolist())
+
+        df_adj = pd.read_sql_query(
+            f"SELECT nombre FROM {TABLA_ADJUDICACIONES}",
+            conn
+        )
+        df_adj = _add_nombre_normalizado(df_adj)
+        nombres_adjudicados = set(df_adj["nombre_normalizado"].tolist())
+
+        df_ini_adelante = df_ini[df_ini["orden_bolsa"] < user_orden].copy()
+        df_no_ahead = df_ini_adelante[
+            ~df_ini_adelante["nombre_normalizado"].isin(nombres_disponibles) &
+            ~df_ini_adelante["nombre_normalizado"].isin(nombres_adjudicados)
+        ].sort_values("orden_bolsa").reset_index(drop=True)
 
         # 5) Resumen por especialidad
         if not df_no_ahead.empty:
             df_no_ahead["especialidades"] = df_no_ahead["especialidades"].fillna("")
             exp_vals = []
             for _, r in df_no_ahead.iterrows():
-                esps = _split_especialidades(r["especialidades"])
-                if not esps:
-                    continue
-                for e in esps:
+                for e in _split_especialidades(r["especialidades"]):
                     exp_vals.append(e)
             if exp_vals:
                 resumen_especialidad = (
@@ -702,15 +781,14 @@ def no_disponibles_adelante(
         else:
             resumen_especialidad = []
 
-        # 6) Payload
         detalle = df_no_ahead.rename(columns={
-            "nombre_normalizado": "nombre",
+            "nombre_normalizado": "nombre_normalizado",
             "orden_bolsa": "orden_bolsa"
         }).to_dict(orient="records")
 
         return {
             "fecha": fecha,
-            "tabla_semana": tabla_semana,
+            "fecha_bd": fecha_bd,
             "usuario": {
                 "nombre": user_nom_display,
                 "nombre_normalizado": user_nom_norm,
@@ -725,13 +803,14 @@ def no_disponibles_adelante(
             }
         }
 
+
+# ─────────────────────────────────────────────
+# DIAGNÓSTICO
+# ─────────────────────────────────────────────
+
 @app.get("/check_junta")
 def check_junta():
-    """
-    Endpoint de diagnóstico temporal.
-    Comprueba si este servidor puede acceder a la web de la Junta de CLM.
-    Borrar una vez confirmado.
-    """
+    """Endpoint de diagnóstico: comprueba acceso a la web de la Junta de CLM."""
     url = "https://educacion.castillalamancha.es/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -756,10 +835,9 @@ def check_junta():
         }
 
 
-
-# =============================================================
-# SCRAPER — ejecuta el pipeline automático desde GitHub Actions
-# =============================================================
+# ─────────────────────────────────────────────
+# SCRAPER PIPELINE
+# ─────────────────────────────────────────────
 
 _scraper_lock = threading.Lock()
 _scraper_log  = logging.getLogger("scraper_pipeline")
@@ -773,19 +851,18 @@ def _ejecutar_pipeline():
     import io
     import json
     import re
-    
+
     parser_disp = importlib.import_module("2_Parser_Disponibles")
     parser_adj  = importlib.import_module("3_Parser_adjudicaciones")
     cargador    = importlib.import_module("4_Cargador_Semanal")
 
     _scraper_log.info("▶ Iniciando scraper en memoria...")
 
-    # 1. Detectar adjudicaciones en portada
     from scraper import obtener_adjudicaciones_portada, extraer_pdfs_pagina, cargar_estado, guardar_estado, descargar_pdf_bytes, BASE_URL
-    
+
     estado = cargar_estado()
     adjudicaciones = obtener_adjudicaciones_portada()
-    
+
     registros_disp = []
     registros_adj  = []
     hay_novedades  = False
@@ -808,7 +885,6 @@ def _ejecutar_pipeline():
                 hay_novedades = True
                 estado["pdfs_descargados"].append(clave_pdf)
 
-                # Extraer fecha del nombre si no la tenemos
                 if not fecha_raw:
                     m = re.search(r'(\d{8})', nombre.replace(' ', ''))
                     if m:
@@ -833,7 +909,6 @@ def _ejecutar_pipeline():
 
     _scraper_log.info(f"  → {len(registros_disp)} disponibles | {len(registros_adj)} adjudicaciones")
 
-    # 2. Normalizar fecha
     if not fecha_raw:
         _scraper_log.error("✗ No se pudo determinar la fecha.")
         return
@@ -845,17 +920,16 @@ def _ejecutar_pipeline():
         if not r.get("fecha_publicacion"):
             r["fecha_publicacion"] = fecha_raw
 
-    # 3. Guardar CSVs temporales y cargar en BD
     import csv, tempfile
     from pathlib import Path
 
-    CAMPOS_DISP = ["fecha","cod_cuerpo","cuerpo","cod_especialidad","especialidad",
-                   "orden","dni","apellidos_nombre","tipo_bolsa","orden_bolsa",
-                   "provincias","ingles","frances","aleman","italiano"]
-    CAMPOS_ADJ  = ["fecha_publicacion","fecha_inicio_periodo","fecha_fin_periodo",
-                   "cod_cuerpo","cuerpo","cod_especialidad","especialidad",
-                   "cod_centro","nombre_centro","localidad","dni","apellidos_nombre",
-                   "titular","bolsa","posicion","tipo_jornada","fecha_inicio","fecha_fin"]
+    CAMPOS_DISP = ["fecha", "cod_cuerpo", "cuerpo", "cod_especialidad", "especialidad",
+                   "orden", "dni", "apellidos_nombre", "tipo_bolsa", "orden_bolsa",
+                   "provincias", "ingles", "frances", "aleman", "italiano"]
+    CAMPOS_ADJ  = ["fecha_publicacion", "fecha_inicio_periodo", "fecha_fin_periodo",
+                   "cod_cuerpo", "cuerpo", "cod_especialidad", "especialidad",
+                   "cod_centro", "nombre_centro", "localidad", "dni", "apellidos_nombre",
+                   "titular", "bolsa", "posicion", "tipo_jornada", "fecha_inicio", "fecha_fin"]
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, encoding='utf-8', newline='') as f_disp:
         writer = csv.DictWriter(f_disp, fieldnames=CAMPOS_DISP, extrasaction='ignore')
@@ -921,7 +995,8 @@ def scraper_status():
         _scraper_lock.release()
     return {"en_ejecucion": en_ejecucion}
 
-# =============================================================
+
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
