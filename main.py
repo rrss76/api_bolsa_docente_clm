@@ -18,8 +18,8 @@ app = FastAPI(title="API Interinos CLM")
 
 DB_PATH = "Base_Bolsa_Docente.db"
 
-# Tabla de la bolsa inicial (inicio de curso, cuerpo 597)
-TABLA_BOLSA_INICIAL = "bolsas_2025_597"
+# Año de convocatoria activo (se usa para detectar tablas de bolsa)
+ANIO_BOLSA = "2025"
 
 # Tabla de disponibles semanales
 TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2025_2026"
@@ -162,6 +162,52 @@ def _tablas_adjudicaciones(conn) -> list:
     return [t for t in tablas["name"] if patron.match(t)]
 
 
+def _tablas_bolsas(conn) -> list:
+    """Devuelve todas las tablas bolsas_YYYY_CCC del año activo, ordenadas por cuerpo."""
+    tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
+    patron = re.compile(rf"^bolsas_{ANIO_BOLSA}_(\d{{3}})$")
+    resultado = []
+    for nombre in tablas["name"]:
+        m = patron.match(nombre)
+        if m:
+            resultado.append((nombre, m.group(1)))  # (tabla, cuerpo)
+    return sorted(resultado, key=lambda x: x[1])
+
+
+def _union_bolsas(conn) -> str:
+    """UNION ALL de todas las bolsas del año activo, todas tienen las mismas columnas."""
+    tablas = _tablas_bolsas(conn)
+    if not tablas:
+        return None
+    partes = [f"SELECT * FROM {t}" for t, _ in tablas]
+    return " UNION ALL ".join(partes)
+
+
+def _union_adjudicaciones(conn) -> str:
+    """
+    Construye un UNION ALL de todas las tablas de adjudicaciones
+    usando únicamente las columnas comunes a todas ellas.
+    Evita el error 'SELECTs do not have the same number of result columns'.
+    """
+    tablas = _tablas_adjudicaciones(conn)
+    if not tablas:
+        return None, []
+
+    # Obtener columnas de cada tabla
+    cols_por_tabla = {}
+    for t in tablas:
+        cursor = conn.execute(f"PRAGMA table_info({t})")
+        cols_por_tabla[t] = [row[1] for row in cursor.fetchall()]
+
+    # Columnas comunes a todas las tablas (preservando orden de la primera)
+    comunes = [c for c in cols_por_tabla[tablas[0]] if all(c in cols_por_tabla[t] for t in tablas)]
+
+    cols_sql = ", ".join(comunes)
+    partes = [f"SELECT {cols_sql} FROM {t}" for t in tablas]
+    union_query = " UNION ALL ".join(partes)
+    return union_query, comunes
+
+
 # ─────────────────────────────────────────────
 # ENDPOINTS BÁSICOS
 # ─────────────────────────────────────────────
@@ -175,7 +221,8 @@ def read_root():
 def get_nombres_normalizados():
     """Lista de nombres distintos de la bolsa inicial (597)."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(f"SELECT DISTINCT nombre FROM {TABLA_BOLSA_INICIAL}", conn)
+        union = _union_bolsas(conn)
+        df = pd.read_sql_query(f"SELECT DISTINCT nombre FROM ({union})", conn)
     nombres = df["nombre"].dropna().sort_values().tolist()
     return [{"nombre": n} for n in nombres]
 
@@ -184,10 +231,9 @@ def get_nombres_normalizados():
 def obtener_adjudicaciones(nombre: str):
     """Devuelve todas las adjudicaciones que contienen el nombre indicado (todos los cursos)."""
     with sqlite3.connect(DB_PATH) as conn:
-        tablas = _tablas_adjudicaciones(conn)
-        if not tablas:
+        union_query, _ = _union_adjudicaciones(conn)
+        if not union_query:
             raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
-        union_query = " UNION ALL ".join([f"SELECT * FROM {t}" for t in tablas])
         df = pd.read_sql_query(f"SELECT * FROM ({union_query})", conn)
 
     df = _add_nombre_normalizado(df)
@@ -202,12 +248,13 @@ def obtener_adjudicaciones(nombre: str):
 
 @app.get("/buscar_nombre")
 def buscar_nombre(query: str = Query(...)):
-    """Búsqueda de nombre con orden_bolsa para autocompletado."""
+    """Búsqueda de nombre con orden_bolsa y cuerpo para autocompletado (todas las bolsas)."""
     qnorm = normalizar_nombre(query)
 
     with sqlite3.connect(DB_PATH) as conn:
+        union = _union_bolsas(conn)
         df = pd.read_sql_query(
-            f"SELECT nombre, orden_bolsa FROM {TABLA_BOLSA_INICIAL};",
+            f"SELECT nombre, orden_bolsa, cuerpo FROM ({union});",
             conn
         )
 
@@ -217,16 +264,18 @@ def buscar_nombre(query: str = Query(...)):
 
     df["orden_bolsa"] = pd.to_numeric(df["orden_bolsa"], errors="coerce")
     df = (df
-          .sort_values(["nombre_normalizado", "orden_bolsa"])
-          .drop_duplicates(subset=["nombre_normalizado", "orden_bolsa"], keep="first")
+          .sort_values(["nombre_normalizado", "cuerpo", "orden_bolsa"])
+          .drop_duplicates(subset=["nombre_normalizado", "cuerpo"], keep="first")
           .reset_index(drop=True))
 
     def mk_display(row):
         ob = row["orden_bolsa"]
-        return f"{row['nombre']} — #{int(ob)}" if pd.notna(ob) else row["nombre"]
+        cuerpo = row.get("cuerpo", "")
+        base = f"{row['nombre']} — #{int(ob)}" if pd.notna(ob) else row["nombre"]
+        return f"{base} (Cuerpo {cuerpo})" if cuerpo else base
 
     df["display"] = df.apply(mk_display, axis=1)
-    return df[["nombre", "orden_bolsa", "display"]].to_dict(orient="records")
+    return df[["nombre", "orden_bolsa", "cuerpo", "display"]].to_dict(orient="records")
 
 
 @app.get("/fechas_disponibles")
@@ -254,7 +303,8 @@ def fechas_disponibles():
 def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino")):
     """Datos de puntuación e idiomas de un interino en la bolsa inicial."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
+        union = _union_bolsas(conn)
+        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
 
     nombre_busqueda = normalizar_nombre(nombre)
     df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
@@ -291,10 +341,9 @@ def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
         raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
 
     with sqlite3.connect(DB_PATH) as conn:
-        tablas = _tablas_adjudicaciones(conn)
-        if not tablas:
+        union_query, _ = _union_adjudicaciones(conn)
+        if not union_query:
             raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
-        union_query = " UNION ALL ".join([f"SELECT * FROM {t}" for t in tablas])
         # Como las fechas son DD/MM/YYYY no son comparables lexicográficamente con BETWEEN,
         # se convierte a formato ISO dentro de SQLite para la comparación.
         df = pd.read_sql_query(
@@ -327,7 +376,8 @@ def posicion_inicial(
 ):
     try:
         with sqlite3.connect(DB_PATH) as conn:
-            df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
+            union = _union_bolsas(conn)
+            df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
 
         df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
         nombre_busqueda = normalizar_nombre(nombre)
@@ -403,7 +453,8 @@ def posicion_disponibles(nombre: str = Query(..., description="Nombre del interi
     nombre = normalizar_nombre(nombre)
 
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
+        union = _union_bolsas(conn)
+        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
 
     df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
@@ -457,7 +508,8 @@ def posicion_disponibles_especialidad(
     nombre = normalizar_nombre(nombre)
 
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(f"SELECT * FROM {TABLA_BOLSA_INICIAL}", conn)
+        union = _union_bolsas(conn)
+        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
 
     df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
@@ -532,28 +584,31 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
     """
     try:
         if fecha.lower() == "inicio":
-            tabla = TABLA_BOLSA_INICIAL
             es_tabla_bolsa = True
         else:
             tabla = _nombre_tabla_interinos(fecha)
             es_tabla_bolsa = False
 
         with sqlite3.connect(DB_PATH) as conn:
-            # Verificar que la tabla existe
-            chk = pd.read_sql_query(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-                conn, params=[tabla]
-            )
-            if chk.empty:
-                raise HTTPException(status_code=404, detail=f"No existe datos para la fecha '{fecha}'.")
-
-            df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
+            if es_tabla_bolsa:
+                union = _union_bolsas(conn)
+                if not union:
+                    raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
+                df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
+            else:
+                chk = pd.read_sql_query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                    conn, params=[tabla]
+                )
+                if chk.empty:
+                    raise HTTPException(status_code=404, detail=f"No existe datos para la fecha '{fecha}'.")
+                df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
 
         if df.empty:
-            raise HTTPException(status_code=404, detail=f"La tabla '{tabla}' está vacía.")
+            raise HTTPException(status_code=404, detail="No se encontraron datos para la fecha indicada.")
 
         if "orden_bolsa" not in df.columns:
-            raise HTTPException(status_code=400, detail=f"La tabla '{tabla}' no tiene la columna 'orden_bolsa'.")
+            raise HTTPException(status_code=400, detail="Los datos no contienen la columna 'orden_bolsa'.")
 
         df = _add_nombre_normalizado(df)
         df["orden_bolsa"] = pd.to_numeric(df["orden_bolsa"], errors="coerce")
@@ -738,11 +793,11 @@ def no_disponibles_adelante(
 
         # 2) Cargar bolsa inicial y localizar al usuario
         df_ini = pd.read_sql_query(
-            f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades FROM {TABLA_BOLSA_INICIAL}",
+            f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades FROM ({_union_bolsas(conn)})",
             conn
         )
         if df_ini.empty:
-            raise HTTPException(status_code=404, detail=f"La tabla '{TABLA_BOLSA_INICIAL}' está vacía.")
+            raise HTTPException(status_code=404, detail="La bolsa inicial está vacía.")
 
         df_ini["orden_bolsa"] = pd.to_numeric(df_ini["orden_bolsa"], errors="coerce")
         cand = df_ini[df_ini["nombre_normalizado"].str.contains(nombre_norm, na=False)]
@@ -778,9 +833,8 @@ def no_disponibles_adelante(
         #    - NO en adjudicaciones (sin importar fecha)
         nombres_disponibles = set(df_sem["nombre_normalizado"].tolist())
 
-        tablas_adj = _tablas_adjudicaciones(conn)
-        if tablas_adj:
-            union_adj = " UNION ALL ".join([f"SELECT nombre FROM {t}" for t in tablas_adj])
+        union_adj, cols_adj = _union_adjudicaciones(conn)
+        if union_adj and "nombre" in cols_adj:
             df_adj = pd.read_sql_query(f"SELECT nombre FROM ({union_adj})", conn)
         else:
             df_adj = pd.DataFrame(columns=["nombre"])
