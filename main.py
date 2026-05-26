@@ -314,8 +314,8 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
         return {"mensaje": "No se encontraron coincidencias."}
 
     columnas_deseadas = [
-        "nombre", "puntos_total", "puntos_apd1", "puntos_apd2", "puntos_apd3",
-        "especialidades", "aleman", "frances", "ingles", "italiano", "leng_signos"
+        "nombre", "cuerpo", "puntos_total", "puntos_apd1", "puntos_apd2", "puntos_apd3",
+        "especialidad", "especialidades", "aleman", "frances", "ingles", "italiano", "leng_signos"
     ]
     # Filtrar solo las que existen en el df (por si alguna falta)
     columnas_deseadas = [c for c in columnas_deseadas if c in coincidencias.columns]
