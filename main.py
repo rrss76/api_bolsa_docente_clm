@@ -278,22 +278,41 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 
 @app.get("/ceses_previstos")
 def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
-    """Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado (todos los cursos)."""
+    """
+    Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado (todos los cursos).
+    Parámetros en formato YYYY-MM-DD. La BD almacena fechas como DD/MM/YYYY,
+    la conversión se hace automáticamente.
+    """
+    # Convertir YYYY-MM-DD → DD/MM/YYYY (formato de la BD)
+    try:
+        desde_bd = datetime.strptime(desde, "%Y-%m-%d").strftime("%d/%m/%Y")
+        hasta_bd = datetime.strptime(hasta, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
+
     with sqlite3.connect(DB_PATH) as conn:
         tablas = _tablas_adjudicaciones(conn)
         if not tablas:
             raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
         union_query = " UNION ALL ".join([f"SELECT * FROM {t}" for t in tablas])
+        # Como las fechas son DD/MM/YYYY no son comparables lexicográficamente con BETWEEN,
+        # se convierte a formato ISO dentro de SQLite para la comparación.
         df = pd.read_sql_query(
             f"""
             SELECT * FROM ({union_query})
-            WHERE fecha_adjudicacion BETWEEN ? AND ?
+            WHERE substr(fecha_adjudicacion,7,4)||substr(fecha_adjudicacion,4,2)||substr(fecha_adjudicacion,1,2)
+                  BETWEEN ? AND ?
             """,
             conn,
-            params=(desde, hasta)
+            params=(
+                desde.replace("-", ""),
+                hasta.replace("-", "")
+            )
         )
     return {
         "total": len(df),
+        "desde": desde,
+        "hasta": hasta,
         "ceses": df.to_dict(orient="records")
     }
 
