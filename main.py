@@ -21,9 +21,6 @@ DB_PATH = "Base_Bolsa_Docente.db"
 # Tabla de la bolsa inicial (inicio de curso, cuerpo 597)
 TABLA_BOLSA_INICIAL = "bolsas_2025_597"
 
-# Tabla de adjudicaciones
-TABLA_ADJUDICACIONES = "adjudicaciones_2025_2026"
-
 # Tabla de disponibles semanales
 TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2025_2026"
 
@@ -158,6 +155,13 @@ def _tablas_interinos_disponibles(conn) -> list:
     return resultado
 
 
+def _tablas_adjudicaciones(conn) -> list:
+    """Devuelve todos los nombres de tabla que siguen el patrón adjudicaciones_YYYY_YYYY."""
+    tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
+    patron = re.compile(r"^adjudicaciones_\d{4}_\d{4}$")
+    return [t for t in tablas["name"] if patron.match(t)]
+
+
 # ─────────────────────────────────────────────
 # ENDPOINTS BÁSICOS
 # ─────────────────────────────────────────────
@@ -178,9 +182,13 @@ def get_nombres_normalizados():
 
 @app.get("/adjudicaciones")
 def obtener_adjudicaciones(nombre: str):
-    """Devuelve todas las adjudicaciones que contienen el nombre indicado."""
+    """Devuelve todas las adjudicaciones que contienen el nombre indicado (todos los cursos)."""
     with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(f"SELECT * FROM {TABLA_ADJUDICACIONES}", conn)
+        tablas = _tablas_adjudicaciones(conn)
+        if not tablas:
+            raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
+        union_query = " UNION ALL ".join([f"SELECT * FROM {t}" for t in tablas])
+        df = pd.read_sql_query(f"SELECT * FROM ({union_query})", conn)
 
     df = _add_nombre_normalizado(df)
     nombre_norm = normalizar_nombre(nombre)
@@ -270,12 +278,15 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 
 @app.get("/ceses_previstos")
 def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
-    """Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado."""
+    """Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado (todos los cursos)."""
     with sqlite3.connect(DB_PATH) as conn:
+        tablas = _tablas_adjudicaciones(conn)
+        if not tablas:
+            raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
+        union_query = " UNION ALL ".join([f"SELECT * FROM {t}" for t in tablas])
         df = pd.read_sql_query(
             f"""
-            SELECT *
-            FROM {TABLA_ADJUDICACIONES}
+            SELECT * FROM ({union_query})
             WHERE fecha_adjudicacion BETWEEN ? AND ?
             """,
             conn,
@@ -748,10 +759,12 @@ def no_disponibles_adelante(
         #    - NO en adjudicaciones (sin importar fecha)
         nombres_disponibles = set(df_sem["nombre_normalizado"].tolist())
 
-        df_adj = pd.read_sql_query(
-            f"SELECT nombre FROM {TABLA_ADJUDICACIONES}",
-            conn
-        )
+        tablas_adj = _tablas_adjudicaciones(conn)
+        if tablas_adj:
+            union_adj = " UNION ALL ".join([f"SELECT nombre FROM {t}" for t in tablas_adj])
+            df_adj = pd.read_sql_query(f"SELECT nombre FROM ({union_adj})", conn)
+        else:
+            df_adj = pd.DataFrame(columns=["nombre"])
         df_adj = _add_nombre_normalizado(df_adj)
         nombres_adjudicados = set(df_adj["nombre_normalizado"].tolist())
 
