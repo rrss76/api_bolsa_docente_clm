@@ -100,6 +100,47 @@ def _split_especialidades(s: str):
     return re.findall(r"\d{3}", str(s))
 
 
+def _normalizar_especialidades_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Construye 'especialidades_norm' con códigos de 3 dígitos siempre:
+    - Bolsa inicial (597): usa 'especialidades' (ej: '036,031,038')
+    - Tablas semanales: usa 'codigo_especialidad' con zfill(3) (ej: '1' → '001')
+    """
+    df = df.copy()
+
+    tiene_esps  = "especialidades" in df.columns
+    tiene_cod   = "codigo_especialidad" in df.columns
+
+    if tiene_esps:
+        base = df["especialidades"].fillna("").str.strip()
+    else:
+        base = pd.Series([""] * len(df), index=df.index)
+
+    # Donde 'especialidades' está vacío, usar codigo_especialidad con padding
+    if tiene_cod:
+        mask_vacio = base == ""
+        def _padear(val):
+            try:
+                return str(int(float(str(val)))).zfill(3)
+            except Exception:
+                return str(val).strip().zfill(3) if str(val).strip().isdigit() else ""
+        base = base.copy()
+        base[mask_vacio] = df.loc[mask_vacio, "codigo_especialidad"].apply(_padear)
+
+    df["especialidades_norm"] = base
+    return df
+
+
+def _split_especialidades_norm(s: str):
+    """
+    Divide 'especialidades_norm' en lista de códigos de 3 dígitos.
+    Siempre son códigos numéricos (la normalización ya los convierte).
+    """
+    if pd.isna(s) or not str(s).strip():
+        return []
+    return re.findall(r"\d{3}", str(s))
+
+
 def _split_provincias(s: str):
     if pd.isna(s) or not str(s).strip():
         return []
@@ -612,7 +653,9 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
 
         df = _add_nombre_normalizado(df)
         df["orden_bolsa"] = pd.to_numeric(df["orden_bolsa"], errors="coerce")
-        df["especialidades"] = df.get("especialidades", pd.Series([""] * len(df))).fillna("")
+
+        # Unificar especialidades y especialidad en una sola columna normalizada
+        df = _normalizar_especialidades_df(df)
 
         # Idiomas: en bolsa inicial es leng_signos, en interinos_YYYYMMDD puede variar
         idiomas_cols = ["aleman", "frances", "ingles", "italiano", "leng_signos"]
@@ -627,7 +670,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         else:
             df["provincias_list"] = [[] for _ in range(len(df))]
 
-        df["especialidades_list"] = df["especialidades"].apply(_split_especialidades)
+        df["especialidades_list"] = df["especialidades_norm"].apply(_split_especialidades_norm)
         df["especialidades_list_full"] = df["especialidades_list"]
 
         df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
@@ -656,7 +699,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
             nom_norm_i = interino["nombre_normalizado"]
             pos_general = _posicion_en(df, nom_norm_i)
 
-            esp_list = _split_especialidades(interino.get("especialidades", ""))
+            esp_list = _split_especialidades_norm(interino.get("especialidades_norm", ""))
             prov_list_interino = interino["provincias_list"] if has_provincias else []
 
             posiciones_especialidad = []
