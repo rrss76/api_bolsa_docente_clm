@@ -370,14 +370,12 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 @app.get("/ceses_previstos")
 def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
     """
-    Adjudicaciones cuya fecha_adjudicacion cae en el rango indicado (todos los cursos).
-    Parámetros en formato YYYY-MM-DD. La BD almacena fechas como DD/MM/YYYY,
-    la conversión se hace automáticamente.
+    Adjudicaciones cuya fecha_fin cae en el rango indicado (todos los cursos).
+    Parámetros en formato YYYY-MM-DD. fecha_fin está en formato YYYY-MM-DD en la BD.
     """
-    # Convertir YYYY-MM-DD → DD/MM/YYYY (formato de la BD)
     try:
-        desde_bd = datetime.strptime(desde, "%Y-%m-%d").strftime("%d/%m/%Y")
-        hasta_bd = datetime.strptime(hasta, "%Y-%m-%d").strftime("%d/%m/%Y")
+        datetime.strptime(desde, "%Y-%m-%d")
+        datetime.strptime(hasta, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
 
@@ -385,19 +383,14 @@ def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
         union_query, _ = _union_adjudicaciones(conn)
         if not union_query:
             raise HTTPException(status_code=404, detail="No se encontraron tablas de adjudicaciones.")
-        # Como las fechas son DD/MM/YYYY no son comparables lexicográficamente con BETWEEN,
-        # se convierte a formato ISO dentro de SQLite para la comparación.
+        # fecha_fin está en YYYY-MM-DD → BETWEEN funciona directamente
         df = pd.read_sql_query(
             f"""
             SELECT * FROM ({union_query})
-            WHERE substr(fecha_adjudicacion,7,4)||substr(fecha_adjudicacion,4,2)||substr(fecha_adjudicacion,1,2)
-                  BETWEEN ? AND ?
+            WHERE fecha_fin BETWEEN ? AND ?
             """,
             conn,
-            params=(
-                desde.replace("-", ""),
-                hasta.replace("-", "")
-            )
+            params=(desde, hasta)
         )
     return {
         "total": len(df),
