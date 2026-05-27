@@ -654,10 +654,10 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         df = _add_nombre_normalizado(df)
         df["orden_bolsa"] = pd.to_numeric(df["orden_bolsa"], errors="coerce")
 
-        # Unificar especialidades y especialidad en una sola columna normalizada
+        # Unificar especialidades en columna normalizada (código 3 dígitos)
         df = _normalizar_especialidades_df(df)
 
-        # Idiomas: en bolsa inicial es leng_signos, en interinos_YYYYMMDD puede variar
+        # Idiomas
         idiomas_cols = ["aleman", "frances", "ingles", "italiano", "leng_signos"]
         for col in idiomas_cols:
             if col not in df.columns:
@@ -666,10 +666,25 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         has_provincias = "provincias" in df.columns
         if has_provincias:
             df["provincias"] = df["provincias"].fillna("")
-            df["provincias_list"] = df["provincias"].apply(_split_provincias)
         else:
-            df["provincias_list"] = [[] for _ in range(len(df))]
+            df["provincias"] = ""
 
+        # ── Agrupar por persona: en tablas semanales cada especialidad es una fila ──
+        # Consolidamos todas las especialidades de la misma persona en una sola fila
+        agg_dict = {
+            "orden_bolsa": "first",
+            "especialidades_norm": lambda x: ",".join(sorted(set(x.dropna().astype(str)))),
+            "provincias": "first",
+        }
+        for col in idiomas_cols:
+            agg_dict[col] = "first"
+
+        df = (df
+              .groupby("nombre_normalizado", sort=False)
+              .agg({"nombre": "first", **agg_dict})
+              .reset_index())
+
+        df["provincias_list"] = df["provincias"].apply(_split_provincias)
         df["especialidades_list"] = df["especialidades_norm"].apply(_split_especialidades_norm)
         df["especialidades_list_full"] = df["especialidades_list"]
 
