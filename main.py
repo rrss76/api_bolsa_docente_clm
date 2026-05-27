@@ -697,7 +697,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
             raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
         cols_keep = [
-            "nombre", "nombre_normalizado", "orden_bolsa",
+            "nombre", "nombre_normalizado", "orden_bolsa", "tipo_bolsa",
             "especialidades_list", "especialidades_list_full",
             "provincias_list", "aleman", "frances", "ingles", "italiano", "leng_signos"
         ]
@@ -721,7 +721,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
             posiciones_especialidad = []
 
             for esp in esp_list:
-                df_esp = df_exp[df_exp["esp"] == esp].sort_values("orden_bolsa")
+                df_esp = df_exp[df_exp["esp"] == esp].sort_values(["tipo_bolsa", "orden_bolsa"])
                 pos_esp = _posicion_en(df_esp, nom_norm_i)
                 total_esp = int(len(df_esp))
 
@@ -748,7 +748,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
                     for cod in prov_list_interino:
                         df_esp_prov = df_esp[
                             df_esp["provincias_list"].apply(lambda lst: isinstance(lst, list) and cod in lst)
-                        ].sort_values("orden_bolsa")
+                        ].sort_values(["tipo_bolsa", "orden_bolsa"])
 
                         pos_esp_prov = _posicion_en(df_esp_prov, nom_norm_i)
                         total_esp_prov = int(len(df_esp_prov))
