@@ -662,10 +662,17 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         else:
             df["provincias"] = ""
 
+        # ── tipo_bolsa: 0=ordinaria, 91=reserva. Si no existe, asumir 0. ──
+        if "tipo_bolsa" in df.columns:
+            df["tipo_bolsa"] = pd.to_numeric(df["tipo_bolsa"], errors="coerce").fillna(0).astype(int)
+        else:
+            df["tipo_bolsa"] = 0
+
         # ── Agrupar por persona: en tablas semanales cada especialidad es una fila ──
         # Consolidamos todas las especialidades de la misma persona en una sola fila
         agg_dict = {
             "orden_bolsa": "first",
+            "tipo_bolsa":  "first",  # mismo tipo para todas las filas del mismo interino
             "especialidades_norm": lambda x: ",".join(sorted(set(x.dropna().astype(str)))),
             "provincias": "first",
         }
@@ -681,7 +688,8 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         df["especialidades_list"] = df["especialidades_norm"].apply(_split_especialidades_norm)
         df["especialidades_list_full"] = df["especialidades_list"]
 
-        df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
+        # Ordenar: primero bolsa ordinaria (0), luego reserva (91+), dentro de cada una por orden_bolsa
+        df = df.sort_values(by=["tipo_bolsa", "orden_bolsa"]).reset_index(drop=True)
         nombre_norm = normalizar_nombre(nombre)
         coincidencias = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
 
