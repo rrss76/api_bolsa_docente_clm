@@ -1,9 +1,11 @@
-name: Scraper Bolsa Docente CLM
+name: Scraper Adjudicaciones CLM
 
 on:
-  #schedule:
-  #  - cron: "0,30 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
+  # Miércoles, jueves y viernes: cada 30 min de 12:00 a 16:00h española (UTC+1)
+  schedule:
+    - cron: "0,30 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
 
+  # Ejecución manual desde GitHub
   workflow_dispatch:
     inputs:
       force:
@@ -18,9 +20,16 @@ on:
 jobs:
   lanzar-scraper:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 5   # Solo hace un curl, no necesita más
 
     steps:
+      - name: Despertar servidor Render
+        run: |
+          echo "Despertando servidor..."
+          curl -s https://api-bolsa-docente-clm.onrender.com/ > /dev/null
+          echo "Esperando 20 segundos para que arranque completamente..."
+          sleep 20
+
       - name: Llamar al endpoint de Render
         id: trigger
         run: |
