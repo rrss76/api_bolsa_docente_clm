@@ -11,6 +11,7 @@ from typing import Tuple
 import os
 import requests as _requests
 import subprocess
+import sys
 import threading
 import logging
 
@@ -997,8 +998,8 @@ def _ejecutar_pipeline():
     import json
     import re
 
-    parser_disp = importlib.import_module("2_Parser_Disponibles_auto")
-    parser_adj  = importlib.import_module("3_Parser_Adjudicaciones_auto")
+    parser_disp = importlib.import_module("2_Parser_Disponibles")
+    parser_adj  = importlib.import_module("3_Parser_adjudicaciones")
     cargador    = importlib.import_module("4_Cargador_Semanal")
 
     _scraper_log.info("▶ Iniciando scraper en memoria...")
@@ -1101,11 +1102,12 @@ def _ejecutar_pipeline():
 
 @app.post("/run-scraper")
 def run_scraper(
-    background_tasks: BackgroundTasks,
-    x_scraper_token: str = Header(..., description="Token secreto de autenticación")
+    x_scraper_token: str = Header(..., description="Token secreto de autenticación"),
+    force: bool = False,
 ):
     """
-    Lanza el scraper + pipeline en background.
+    Lanza el pipeline como proceso independiente (Popen) para evitar
+    el timeout de Render en procesos largos.
     Llamar desde GitHub Actions:
       curl -X POST https://api-interinos-2025.onrender.com/run-scraper
            -H "x-scraper-token: TU_TOKEN"
@@ -1122,14 +1124,23 @@ def run_scraper(
             "mensaje": "El scraper ya está corriendo, espera a que termine."
         }
 
-    def tarea():
-        try:
-            _ejecutar_pipeline()
-        finally:
-            _scraper_lock.release()
+    try:
+        cmd = [sys.executable, "run_pipeline.py"]
+        if force:
+            cmd.append("--force")
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        # El lock se liberará cuando el proceso termine
+        # (no podemos hacer join sin bloquear, así que lo liberamos tras lanzar)
+        _scraper_lock.release()
+    except Exception as e:
+        _scraper_lock.release()
+        raise HTTPException(status_code=500, detail=f"Error lanzando pipeline: {e}")
 
-    background_tasks.add_task(tarea)
-    return {"status": "iniciado", "mensaje": "Scraper lanzado en background."}
+    return {"status": "iniciado", "mensaje": "Pipeline lanzado como proceso independiente."}
 
 
 @app.get("/scraper-status")
