@@ -64,18 +64,7 @@ def guardar_estado(estado: dict):
         json.dumps(estado, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
-  
-def descargar_pdf_bytes(url_pdf: str) -> tuple[bytes, str] | None:
-    """Descarga un PDF y devuelve (bytes, nombre) sin guardar en disco."""
-    from urllib.parse import unquote
-    nombre = unquote(Path(url_pdf.split("?")[0]).name)
-    try:
-        resp = requests.get(url_pdf, headers=HEADERS, timeout=60, stream=True)
-        resp.raise_for_status()
-        return resp.content, nombre
-    except Exception as e:
-        print(f"    ✗ Error descargando {nombre}: {e}")
-        return None
+
 
 # ---------------------------------------------------------------------------
 # Detección de adjudicaciones en portada
@@ -127,48 +116,43 @@ def obtener_adjudicaciones_portada() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def extraer_pdfs_pagina(url: str) -> dict[str, list[dict]]:
+    """
+    Visita la página de una adjudicación y devuelve los PDFs organizados
+    por sección: {"adjudicados": [...], "disponibles": [...]}
+    Cada PDF: {"nombre": ..., "url": ..., "seccion": ...}
+    """
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
     resultado = {k: [] for k in SECCIONES_INTERES}
+    seccion_actual = None
 
-    # Buscar todos los botones del acordeón
-    for boton in soup.find_all("button", class_="accordion-button"):
-        texto_boton = boton.get_text(strip=True)
+    for elem in soup.find_all(["h2", "h3", "p", "a"]):
+        # Detectar cambio de sección
+        if elem.name in ("h2", "h3"):
+            texto = elem.get_text(strip=True)
+            for clave, patron in SECCIONES_INTERES.items():
+                if patron.lower() in texto.lower():
+                    seccion_actual = clave
+                    break
+            else:
+                # Si el encabezado no es de ninguna sección de interés,
+                # reseteamos solo si es un encabezado mayor
+                if elem.name == "h2":
+                    seccion_actual = None
 
-        # Determinar a qué sección pertenece
-        seccion_actual = None
-        for clave, patron in SECCIONES_INTERES.items():
-            if patron.lower() in texto_boton.lower():
-                seccion_actual = clave
-                break
-
-        if not seccion_actual:
-            continue
-
-        # Buscar el div colapsable asociado al botón
-        target_id = boton.get("data-bs-target", "").lstrip("#")
-        if not target_id:
-            continue
-
-        contenedor = soup.find("div", {"id": target_id})
-        if not contenedor:
-            continue
-
-        # Extraer todos los enlaces PDF dentro del contenedor
-        for a in contenedor.find_all("a", class_="file-download-pdf"):
-            href = a.get("href", "")
-            if not href:
-                continue
-            url_pdf = href if href.startswith("http") else BASE_URL + href
-            nombre_span = a.find("span", class_="file--title")
-            nombre = nombre_span.get_text(strip=True) if nombre_span else Path(href).name
-            resultado[seccion_actual].append({
-                "nombre":  nombre,
-                "url":     url_pdf,
-                "seccion": seccion_actual,
-            })
+        # Recoger enlaces PDF en la sección activa
+        elif elem.name == "a" and seccion_actual:
+            href = elem.get("href", "")
+            if href.lower().endswith(".pdf"):
+                url_pdf = href if href.startswith("http") else BASE_URL + href
+                nombre  = elem.get_text(strip=True) or Path(href).name
+                resultado[seccion_actual].append({
+                    "nombre":  nombre,
+                    "url":     url_pdf,
+                    "seccion": seccion_actual,
+                })
 
     total = sum(len(v) for v in resultado.values())
     for sec, pdfs in resultado.items():
@@ -204,6 +188,23 @@ def descargar_pdf(url_pdf: str, carpeta: Path) -> Path | None:
         print(f"    ✗ Error descargando {nombre}: {e}")
         return None
 
+
+
+
+def descargar_pdf_bytes(url_pdf: str) -> tuple | None:
+    """
+    Descarga un PDF y devuelve (bytes, nombre_fichero).
+    No guarda nada en disco. Devuelve None si falla.
+    """
+    from urllib.parse import unquote
+    nombre = unquote(Path(url_pdf.split("?")[0]).name)
+    try:
+        resp = requests.get(url_pdf, headers=HEADERS, timeout=60, stream=True)
+        resp.raise_for_status()
+        return resp.content, nombre
+    except Exception as e:
+        print(f"    ✗ Error descargando {nombre}: {e}")
+        return None
 
 # ---------------------------------------------------------------------------
 # Proceso principal

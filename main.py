@@ -997,8 +997,8 @@ def _ejecutar_pipeline():
     import json
     import re
 
-    parser_disp = importlib.import_module("2_Parser_Disponibles")
-    parser_adj  = importlib.import_module("3_Parser_adjudicaciones")
+    parser_disp = importlib.import_module("2_Parser_Disponibles_auto")
+    parser_adj  = importlib.import_module("3_Parser_Adjudicaciones_auto")
     cargador    = importlib.import_module("4_Cargador_Semanal")
 
     _scraper_log.info("▶ Iniciando scraper en memoria...")
