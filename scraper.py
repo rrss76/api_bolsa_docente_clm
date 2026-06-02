@@ -120,6 +120,10 @@ def extraer_pdfs_pagina(url: str) -> dict[str, list[dict]]:
     Visita la página de una adjudicación y devuelve los PDFs organizados
     por sección: {"adjudicados": [...], "disponibles": [...]}
     Cada PDF: {"nombre": ..., "url": ..., "seccion": ...}
+
+    Los epígrafes "Aspirantes adjudicados" y "Aspirantes disponibles"
+    aparecen como texto plano dentro de la página, no siempre como <h2>/<h3>,
+    por lo que se recorre el DOM completo buscando coincidencias de texto.
     """
     resp = requests.get(url, headers=HEADERS, timeout=30)
     resp.raise_for_status()
@@ -128,31 +132,31 @@ def extraer_pdfs_pagina(url: str) -> dict[str, list[dict]]:
     resultado = {k: [] for k in SECCIONES_INTERES}
     seccion_actual = None
 
-    for elem in soup.find_all(["h2", "h3", "p", "a"]):
-        # Detectar cambio de sección
-        if elem.name in ("h2", "h3"):
-            texto = elem.get_text(strip=True)
+    for elem in soup.find_all(True):  # todos los elementos del DOM
+        texto = elem.get_text(strip=True)
+
+        # Detectar cambio de sección por texto (funciona con cualquier etiqueta)
+        if len(texto) < 80:
             for clave, patron in SECCIONES_INTERES.items():
                 if patron.lower() in texto.lower():
                     seccion_actual = clave
                     break
-            else:
-                # Si el encabezado no es de ninguna sección de interés,
-                # reseteamos solo si es un encabezado mayor
-                if elem.name == "h2":
-                    seccion_actual = None
 
         # Recoger enlaces PDF en la sección activa
-        elif elem.name == "a" and seccion_actual:
+        if elem.name == "a" and seccion_actual:
             href = elem.get("href", "")
             if href.lower().endswith(".pdf"):
-                url_pdf = href if href.startswith("http") else BASE_URL + href
-                nombre  = elem.get_text(strip=True) or Path(href).name
-                resultado[seccion_actual].append({
-                    "nombre":  nombre,
-                    "url":     url_pdf,
-                    "seccion": seccion_actual,
-                })
+                nombre_pdf = elem.get_text(strip=True) or Path(href).name
+                # Solo PDFs de aspirantes (disponibles o adjudicados)
+                if "aspirantes" in nombre_pdf.lower() or "aspirantes" in href.lower():
+                    url_pdf = href if href.startswith("http") else BASE_URL + href
+                    # Evitar duplicados
+                    if not any(p["url"] == url_pdf for p in resultado[seccion_actual]):
+                        resultado[seccion_actual].append({
+                            "nombre":  nombre_pdf,
+                            "url":     url_pdf,
+                            "seccion": seccion_actual,
+                        })
 
     total = sum(len(v) for v in resultado.values())
     for sec, pdfs in resultado.items():
