@@ -270,7 +270,7 @@ def get_nombres_normalizados():
 
 
 @app.get("/adjudicaciones")
-def obtener_adjudicaciones(nombre: str):
+def obtener_adjudicaciones(nombre: str, dni: str = Query(None, description="DNI ofuscado para identificar unívocamente al interino")):
     """Devuelve todas las adjudicaciones que contienen el nombre indicado (todos los cursos)."""
     with sqlite3.connect(DB_PATH) as conn:
         union_query, _ = _union_adjudicaciones(conn)
@@ -284,6 +284,11 @@ def obtener_adjudicaciones(nombre: str):
     df_filtrado = df[df["nombre_normalizado"] == nombre_norm]
     if df_filtrado.empty:
         df_filtrado = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
+    # Filtrar por DNI si se proporciona (identificador único)
+    if dni and not df_filtrado.empty and "dni_ofuscado" in df_filtrado.columns:
+        filtrado_dni = df_filtrado[df_filtrado["dni_ofuscado"].astype(str) == str(dni)]
+        if not filtrado_dni.empty:
+            df_filtrado = filtrado_dni
 
     if df_filtrado.empty:
         return {"adjudicaciones": []}
@@ -299,7 +304,7 @@ def buscar_nombre(query: str = Query(...)):
     with sqlite3.connect(DB_PATH) as conn:
         union = _union_bolsas(conn)
         df = pd.read_sql_query(
-            f"SELECT nombre, orden_bolsa, cuerpo FROM ({union});",
+            f"SELECT nombre, orden_bolsa, cuerpo, dni_ofuscado FROM ({union});",
             conn
         )
 
@@ -320,7 +325,7 @@ def buscar_nombre(query: str = Query(...)):
         return f"{base} (Cuerpo {cuerpo})" if cuerpo else base
 
     df["display"] = df.apply(mk_display, axis=1)
-    return df[["nombre", "orden_bolsa", "cuerpo", "display"]].to_dict(orient="records")
+    return df[["nombre", "orden_bolsa", "cuerpo", "dni_ofuscado", "display"]].to_dict(orient="records")
 
 
 @app.get("/fechas_disponibles")
@@ -345,7 +350,7 @@ def fechas_disponibles():
 
 
 @app.get("/datos_interino")
-def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino")):
+def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino"), dni: str = Query(None, description="DNI ofuscado para identificar unívocamente al interino")):
     """Datos de puntuación e idiomas de un interino en la bolsa inicial."""
     with sqlite3.connect(DB_PATH) as conn:
         union = _union_bolsas(conn)
@@ -357,6 +362,11 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
     coincidencias = df[df["nombre_normalizado"] == nombre_busqueda]
     if coincidencias.empty:
         coincidencias = df[df["nombre_normalizado"].str.contains(nombre_busqueda, case=False, na=False)]
+    # Filtrar por DNI si se proporciona (identificador único)
+    if dni and not coincidencias.empty and "dni_ofuscado" in coincidencias.columns:
+        filtrado_dni = coincidencias[coincidencias["dni_ofuscado"].astype(str) == str(dni)]
+        if not filtrado_dni.empty:
+            coincidencias = filtrado_dni
 
     if coincidencias.empty:
         return {"mensaje": "No se encontraron coincidencias."}
