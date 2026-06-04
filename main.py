@@ -280,7 +280,10 @@ def obtener_adjudicaciones(nombre: str):
 
     df = _add_nombre_normalizado(df)
     nombre_norm = normalizar_nombre(nombre)
-    df_filtrado = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
+    # Primero buscar coincidencia exacta; si no hay, usar contains como fallback
+    df_filtrado = df[df["nombre_normalizado"] == nombre_norm]
+    if df_filtrado.empty:
+        df_filtrado = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
 
     if df_filtrado.empty:
         return {"adjudicaciones": []}
@@ -350,7 +353,10 @@ def datos_interino(nombre: str = Query(..., description="Nombre completo o parci
 
     nombre_busqueda = normalizar_nombre(nombre)
     df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
-    coincidencias = df[df["nombre_normalizado"].str.contains(nombre_busqueda, case=False, na=False)]
+    # Primero buscar coincidencia exacta; si no hay, usar contains como fallback
+    coincidencias = df[df["nombre_normalizado"] == nombre_busqueda]
+    if coincidencias.empty:
+        coincidencias = df[df["nombre_normalizado"].str.contains(nombre_busqueda, case=False, na=False)]
 
     if coincidencias.empty:
         return {"mensaje": "No se encontraron coincidencias."}
