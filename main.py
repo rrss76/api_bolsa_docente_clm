@@ -53,8 +53,8 @@ def get_app_meta_dict():
             ],
         },
         "ios": {
-            "latest": _env("APP_IOS_LATEST", "3.0.7"),
-            "min":    _env("APP_IOS_MIN",    "3.0.4"),
+            "latest": _env("APP_IOS_LATEST", "3.0.8"),
+            "min":    _env("APP_IOS_MIN",    "3.0.7"),
             "force":  _env("APP_IOS_FORCE",  "false").lower() == "true",
             "store_url": _env(
                 "APP_IOS_STORE_URL",
