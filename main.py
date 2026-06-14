@@ -1002,6 +1002,17 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
     try:
         nombre_norm = normalizar_nombre(nombre)
 
+        def _parse_provs(prov_str: str) -> list:
+            """Normaliza una cadena de provincias a lista de códigos de 2 dígitos."""
+            out, seen = [], set()
+            for p in re.sub(r"[;/\s]+", ",", prov_str or "").split(","):
+                p = re.sub(r"\D", "", p)
+                if len(p) == 1: p = p.zfill(2)
+                elif len(p) > 2: p = p[-2:]
+                if p in ALLOWED_PROV and p not in seen:
+                    seen.add(p); out.append(p)
+            return out
+
         if fecha.lower() == "inicio":
             # ── Bolsa inicial: 9 tablas UNION ALL ──────────────────────────────
             with sqlite3.connect(DB_PATH) as conn:
@@ -1009,14 +1020,13 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 if not tablas_bolsa:
                     raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
 
-                # UNION ligera: solo las columnas que necesitamos
                 union_ligera = " UNION ALL ".join(
-                    f"SELECT nombre_normalizado, nombre, orden_bolsa, especialidades FROM {t}"
+                    f"SELECT nombre_normalizado, nombre, orden_bolsa, especialidades, COALESCE(provincias,'') AS provincias FROM {t}"
                     for t, _ in tablas_bolsa
                 )
 
                 row = conn.execute(
-                    f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades "
+                    f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades, provincias "
                     f"FROM ({union_ligera}) WHERE nombre_normalizado LIKE ? LIMIT 1",
                     (f"%{nombre_norm}%",)
                 ).fetchone()
@@ -1024,22 +1034,21 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 if not row:
                     raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
-                nombre_found, _, orden_b, especialidades_str = row
+                nombre_found, _, orden_b, especialidades_str, prov_str = row
                 orden_b = int(orden_b) if orden_b is not None else 0
+                mis_provincias = _parse_provs(prov_str or "")
 
-                # Posición general (tipo_bolsa=0 para todos en bolsa inicial)
                 pos_general_cnt = conn.execute(
                     f"SELECT COUNT(DISTINCT nombre_normalizado) FROM ({union_ligera}) WHERE CAST(orden_bolsa AS INTEGER) < ?",
                     (orden_b,)
                 ).fetchone()[0]
                 pos_general = pos_general_cnt + 1
 
-                # Posición por especialidad
                 esps = _split_especialidades(especialidades_str or "")
                 posiciones_esp = []
                 for esp in esps:
                     union_esp = " UNION ALL ".join(
-                        f"SELECT nombre_normalizado, orden_bolsa FROM {t} "
+                        f"SELECT nombre_normalizado, orden_bolsa, COALESCE(provincias,'') AS provincias FROM {t} "
                         f"WHERE ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%'"
                         for t, _ in tablas_bolsa
                     )
@@ -1048,7 +1057,23 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                         f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
                         (orden_b,)
                     ).fetchone()[0]
-                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1})
+
+                    por_provincia = []
+                    for prov in mis_provincias:
+                        union_prov = " UNION ALL ".join(
+                            f"SELECT nombre_normalizado, orden_bolsa FROM {t} "
+                            f"WHERE ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%' "
+                            f"AND ',' || COALESCE(provincias,'') || ',' LIKE '%,{prov},%'"
+                            for t, _ in tablas_bolsa
+                        )
+                        cnt_prov = conn.execute(
+                            f"SELECT COUNT(DISTINCT nombre_normalizado) FROM ({union_prov}) "
+                            f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
+                            (orden_b,)
+                        ).fetchone()[0]
+                        por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+
+                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
 
             return {
                 "fecha": fecha,
@@ -1056,6 +1081,7 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 "interinos": [{
                     "nombre": nombre_found,
                     "posicion_general": pos_general,
+                    "provincias_activas": mis_provincias,
                     "posiciones_por_especialidad": posiciones_esp
                 }]
             }
@@ -1072,7 +1098,7 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                     raise HTTPException(status_code=404, detail=f"No existen datos para la fecha '{fecha}'.")
 
                 rows = conn.execute(
-                    f"SELECT nombre, tipo_bolsa, orden_bolsa, codigo_especialidad "
+                    f"SELECT nombre, tipo_bolsa, orden_bolsa, codigo_especialidad, COALESCE(provincias,'') "
                     f"FROM {tabla} WHERE nombre LIKE ?",
                     (f"%{nombre_norm}%",)
                 ).fetchall()
@@ -1081,10 +1107,10 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                     raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
                 nombre_found = rows[0][0]
-                tipo_b = rows[0][1]   # string '0' o '91'
-                orden_b = rows[0][2]  # integer
+                tipo_b  = rows[0][1]
+                orden_b = rows[0][2]
+                mis_provincias = _parse_provs(rows[0][4] or "")
 
-                # Posición general
                 pos_general_cnt = conn.execute(f"""
                     SELECT COUNT(DISTINCT nombre) FROM {tabla}
                     WHERE (CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
@@ -1092,7 +1118,6 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 """, (tipo_b, tipo_b, orden_b)).fetchone()[0]
                 pos_general = pos_general_cnt + 1
 
-                # Posición por especialidad
                 esps = sorted(set(str(r[3]).zfill(3) for r in rows if r[3]))
                 posiciones_esp = []
                 for esp in esps:
@@ -1102,7 +1127,19 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                           AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
                             OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
                     """, (esp, tipo_b, tipo_b, orden_b)).fetchone()[0]
-                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1})
+
+                    por_provincia = []
+                    for prov in mis_provincias:
+                        cnt_prov = conn.execute(f"""
+                            SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                            WHERE codigo_especialidad = ?
+                              AND (',' || COALESCE(provincias,'') || ',' LIKE ?)
+                              AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
+                                OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
+                        """, (esp, f"%,{prov},%", tipo_b, tipo_b, orden_b)).fetchone()[0]
+                        por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+
+                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
 
             return {
                 "fecha": fecha,
@@ -1110,6 +1147,7 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 "interinos": [{
                     "nombre": nombre_found,
                     "posicion_general": pos_general,
+                    "provincias_activas": mis_provincias,
                     "posiciones_por_especialidad": posiciones_esp
                 }]
             }
