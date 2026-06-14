@@ -331,14 +331,13 @@ def buscar_nombre(query: str = Query(...)):
 @app.get("/fechas_disponibles")
 def fechas_disponibles():
     """
-    Devuelve las fechas disponibles:
-      - 'inicio': la bolsa inicial (bolsas_2025_597)
-      - Fechas YYYY-MM-DD de las tablas interinos_YYYYMMDD
+    Devuelve las fechas YYYY-MM-DD de las tablas interinos_YYYYMMDD, ordenadas.
+    La bolsa inicial ('inicio') se consulta directamente con /posicion_en_fecha?fecha=inicio.
     """
     with sqlite3.connect(DB_PATH) as conn:
         tablas_interinos = _tablas_interinos_disponibles(conn)
 
-    fechas = ["inicio"]
+    fechas = []
     for _, yyyymmdd in tablas_interinos:
         try:
             dt = datetime.strptime(yyyymmdd, "%Y%m%d")
