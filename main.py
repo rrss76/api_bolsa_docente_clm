@@ -216,6 +216,26 @@ def _tablas_bolsas(conn) -> list:
     return sorted(resultado, key=lambda x: x[1])
 
 
+def _fecha_skipping_verano(fecha_inicio: date, semanas: float) -> date:
+    """
+    Añade 'semanas' semanas activas a fecha_inicio saltando julio y agosto
+    (meses sin adjudicaciones). Si en algún momento caemos en julio,
+    saltamos directamente al 1 de septiembre.
+    """
+    if semanas is None or semanas <= 0:
+        return fecha_inicio
+    fecha = fecha_inicio
+    if fecha.month in (7, 8):
+        fecha = date(fecha.year, 9, 1)
+    semanas_restantes = float(semanas)
+    while semanas_restantes > 0.01:
+        fecha += timedelta(weeks=1)
+        if fecha.month == 7:
+            fecha = date(fecha.year, 9, 1)
+        semanas_restantes -= 1
+    return fecha
+
+
 def _union_bolsas(conn) -> str:
     """UNION ALL de todas las bolsas del año activo, todas tienen las mismas columnas."""
     tablas = _tablas_bolsas(conn)
@@ -1167,9 +1187,9 @@ def estimacion_adjudicacion(
         semanas_pes = round(posicion / tasa_pes, 1)
 
         hoy = date.today()
-        fecha_central = (hoy + timedelta(weeks=semanas_central)).isoformat()
-        fecha_opt = (hoy + timedelta(weeks=semanas_opt)).isoformat()
-        fecha_pes = (hoy + timedelta(weeks=semanas_pes)).isoformat()
+        fecha_central = _fecha_skipping_verano(hoy, semanas_central).isoformat()
+        fecha_opt     = _fecha_skipping_verano(hoy, semanas_opt).isoformat()
+        fecha_pes     = _fecha_skipping_verano(hoy, semanas_pes).isoformat()
     else:
         semanas_central = semanas_opt = semanas_pes = None
         fecha_central = fecha_opt = fecha_pes = None
