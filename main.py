@@ -635,6 +635,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
     try:
         if fecha.lower() == "inicio":
             es_tabla_bolsa = True
+            tabla = "bolsa_inicial"
         else:
             tabla = _nombre_tabla_interinos(fecha)
             es_tabla_bolsa = False
@@ -967,6 +968,138 @@ def no_disponibles_adelante(
 
 # ─────────────────────────────────────────────
 # ESTIMACIÓN DE ADJUDICACIÓN
+# ─────────────────────────────────────────────
+# POSICIÓN BÁSICA (versión rápida para historial)
+# ─────────────────────────────────────────────
+
+@app.get("/posicion_basica")
+def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
+    """
+    Versión ligera de posicion_en_fecha: solo posición general y por especialidad.
+    Usa SQL COUNT en lugar de cargar toda la tabla. ~10x más rápido.
+    Diseñado para el historial de posición (34 fechas en paralelo).
+    """
+    try:
+        nombre_norm = normalizar_nombre(nombre)
+
+        if fecha.lower() == "inicio":
+            # ── Bolsa inicial: 9 tablas UNION ALL ──────────────────────────────
+            with sqlite3.connect(DB_PATH) as conn:
+                tablas_bolsa = _tablas_bolsas(conn)
+                if not tablas_bolsa:
+                    raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
+
+                # UNION ligera: solo las columnas que necesitamos
+                union_ligera = " UNION ALL ".join(
+                    f"SELECT nombre_normalizado, nombre, orden_bolsa, especialidades FROM {t}"
+                    for t, _ in tablas_bolsa
+                )
+
+                row = conn.execute(
+                    f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades "
+                    f"FROM ({union_ligera}) WHERE nombre_normalizado LIKE ? LIMIT 1",
+                    (f"%{nombre_norm}%",)
+                ).fetchone()
+
+                if not row:
+                    raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
+
+                nombre_found, _, orden_b, especialidades_str = row
+                orden_b = int(orden_b) if orden_b is not None else 0
+
+                # Posición general (tipo_bolsa=0 para todos en bolsa inicial)
+                pos_general_cnt = conn.execute(
+                    f"SELECT COUNT(DISTINCT nombre_normalizado) FROM ({union_ligera}) WHERE CAST(orden_bolsa AS INTEGER) < ?",
+                    (orden_b,)
+                ).fetchone()[0]
+                pos_general = pos_general_cnt + 1
+
+                # Posición por especialidad
+                esps = _split_especialidades(especialidades_str or "")
+                posiciones_esp = []
+                for esp in esps:
+                    union_esp = " UNION ALL ".join(
+                        f"SELECT nombre_normalizado, orden_bolsa FROM {t} "
+                        f"WHERE ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%'"
+                        for t, _ in tablas_bolsa
+                    )
+                    cnt_esp = conn.execute(
+                        f"SELECT COUNT(DISTINCT nombre_normalizado) FROM ({union_esp}) "
+                        f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
+                        (orden_b,)
+                    ).fetchone()[0]
+                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1})
+
+            return {
+                "fecha": fecha,
+                "tabla_usada": "bolsa_inicial",
+                "interinos": [{
+                    "nombre": nombre_found,
+                    "posicion_general": pos_general,
+                    "posiciones_por_especialidad": posiciones_esp
+                }]
+            }
+
+        else:
+            # ── Tabla semanal ───────────────────────────────────────────────────
+            tabla = _nombre_tabla_interinos(fecha)
+
+            with sqlite3.connect(DB_PATH) as conn:
+                chk = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tabla,)
+                ).fetchone()
+                if not chk:
+                    raise HTTPException(status_code=404, detail=f"No existen datos para la fecha '{fecha}'.")
+
+                rows = conn.execute(
+                    f"SELECT nombre, tipo_bolsa, orden_bolsa, codigo_especialidad "
+                    f"FROM {tabla} WHERE nombre LIKE ?",
+                    (f"%{nombre_norm}%",)
+                ).fetchall()
+
+                if not rows:
+                    raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
+
+                nombre_found = rows[0][0]
+                tipo_b = rows[0][1]   # string '0' o '91'
+                orden_b = rows[0][2]  # integer
+
+                # Posición general
+                pos_general_cnt = conn.execute(f"""
+                    SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                    WHERE (CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
+                       OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?)
+                """, (tipo_b, tipo_b, orden_b)).fetchone()[0]
+                pos_general = pos_general_cnt + 1
+
+                # Posición por especialidad
+                esps = sorted(set(str(r[3]).zfill(3) for r in rows if r[3]))
+                posiciones_esp = []
+                for esp in esps:
+                    cnt_esp = conn.execute(f"""
+                        SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                        WHERE codigo_especialidad = ?
+                          AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
+                            OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
+                    """, (esp, tipo_b, tipo_b, orden_b)).fetchone()[0]
+                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1})
+
+            return {
+                "fecha": fecha,
+                "tabla_usada": tabla,
+                "interinos": [{
+                    "nombre": nombre_found,
+                    "posicion_general": pos_general,
+                    "posiciones_por_especialidad": posiciones_esp
+                }]
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─────────────────────────────────────────────
 
 @app.get("/estimacion_adjudicacion")
