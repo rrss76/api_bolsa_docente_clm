@@ -4,7 +4,7 @@ import pandas as pd
 import unicodedata
 from typing import Optional
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date, timedelta
 import re
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Tuple
@@ -964,6 +964,103 @@ def no_disponibles_adelante(
                 "por_especialidad": resumen_especialidad
             }
         }
+
+
+# ─────────────────────────────────────────────
+# ESTIMACIÓN DE ADJUDICACIÓN
+# ─────────────────────────────────────────────
+
+@app.get("/estimacion_adjudicacion")
+def estimacion_adjudicacion(
+    especialidad: str = Query(..., description="Código de especialidad (ej. 038)"),
+    posicion: int = Query(..., description="Posición actual del interino en la lista de disponibles para esa especialidad"),
+):
+    """
+    Calcula la tasa media de adjudicaciones semanales para una especialidad
+    y estima en cuántas semanas podría ser llamado el interino según su posición.
+
+    La estimación usa el histórico de adjudicaciones_2025_2026 agrupado por semana ISO.
+    """
+    try:
+        esp_int = int(especialidad)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Código de especialidad no válido.")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        union_query, cols = _union_adjudicaciones(conn)
+        if not union_query:
+            raise HTTPException(status_code=404, detail="No hay tablas de adjudicaciones.")
+        if "codigo_especialidad" not in cols or "semana" not in cols:
+            raise HTTPException(status_code=422, detail="Las tablas de adjudicaciones no contienen 'codigo_especialidad' o 'semana'.")
+
+        df = pd.read_sql_query(
+            f"SELECT codigo_especialidad, semana FROM ({union_query})",
+            conn
+        )
+
+    if df.empty:
+        raise HTTPException(status_code=404, detail="No hay datos de adjudicaciones.")
+
+    # Normalizar código a entero para comparar (la tabla guarda "38", la bolsa usa "038")
+    def _to_int(val):
+        try:
+            return int(str(val).strip())
+        except Exception:
+            return None
+
+    df["cod_int"] = df["codigo_especialidad"].apply(_to_int)
+    df_esp = df[df["cod_int"] == esp_int].dropna(subset=["semana"]).copy()
+
+    if df_esp.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No hay adjudicaciones registradas para la especialidad {especialidad} en el curso actual."
+        )
+
+    # Adjudicaciones por semana
+    adj_por_semana = df_esp["semana"].value_counts().sort_index()
+    total = int(len(df_esp))
+    num_semanas = int(len(adj_por_semana))
+    media = round(total / num_semanas, 1) if num_semanas > 0 else 0.0
+    desv = round(float(adj_por_semana.std()), 1) if num_semanas > 1 else 0.0
+
+    # Estimación
+    if media > 0:
+        semanas_central = round(posicion / media, 1)
+        # Rango usando (media ± desviación), acotado a valores positivos
+        tasa_opt = media + desv if desv > 0 else media * 1.3
+        tasa_pes = max(1.0, media - desv) if desv > 0 else max(1.0, media * 0.7)
+
+        semanas_opt = round(posicion / tasa_opt, 1)
+        semanas_pes = round(posicion / tasa_pes, 1)
+
+        hoy = date.today()
+        fecha_central = (hoy + timedelta(weeks=semanas_central)).isoformat()
+        fecha_opt = (hoy + timedelta(weeks=semanas_opt)).isoformat()
+        fecha_pes = (hoy + timedelta(weeks=semanas_pes)).isoformat()
+    else:
+        semanas_central = semanas_opt = semanas_pes = None
+        fecha_central = fecha_opt = fecha_pes = None
+
+    return {
+        "especialidad": especialidad,
+        "posicion_actual": posicion,
+        "estadisticas": {
+            "total_adjudicaciones_curso": total,
+            "semanas_con_datos": num_semanas,
+            "media_semanal": media,
+            "desviacion_semanal": desv,
+            "detalle_por_semana": adj_por_semana.to_dict(),
+        },
+        "estimacion": {
+            "semanas_estimadas": semanas_central,
+            "semanas_optimista": semanas_opt,
+            "semanas_pesimista": semanas_pes,
+            "fecha_estimada": fecha_central,
+            "fecha_optimista": fecha_opt,
+            "fecha_pesimista": fecha_pes,
+        }
+    }
 
 
 # ─────────────────────────────────────────────
