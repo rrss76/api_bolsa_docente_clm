@@ -678,14 +678,15 @@ def posicion_disponibles_especialidad(
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_en_fecha")
-def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
+def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: str = Query(None)):
     """
     Devuelve la posición de un interino en una fecha concreta.
 
-    - fecha='inicio'  → usa la bolsa inicial (bolsas_2025_597)
+    - fecha='inicio'  → usa la bolsa inicial del año indicado por 'anio' (o ANIO_BOLSA si no se indica)
     - fecha='YYYY-MM-DD' → busca la tabla interinos_YYYYMMDD
     """
     try:
+        anio_bolsa = anio if anio else ANIO_BOLSA
         if fecha.lower() == "inicio":
             es_tabla_bolsa = True
             tabla = "bolsa_inicial"
@@ -696,7 +697,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...)):
         with sqlite3.connect(DB_PATH) as conn:
             if es_tabla_bolsa:
                 # Buscar la tabla específica del cuerpo del interino (no mezclar cuerpos)
-                tablas_bolsa = [t for t, _ in _tablas_bolsas(conn)]
+                tablas_bolsa = [t for t, _ in _tablas_bolsas_anio(conn, anio_bolsa)]
                 if not tablas_bolsa:
                     raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
                 nombre_norm = normalizar_nombre(nombre)
