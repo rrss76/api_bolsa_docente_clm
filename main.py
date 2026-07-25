@@ -1182,6 +1182,7 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
 
                             posiciones_esp.append({
                                 "especialidad": cod_esp,
+                                "nombre_especialidad": esp_nombre or None,
                                 "posicion": pos_esp,
                                 "por_provincia": por_provincia
                             })
