@@ -20,10 +20,10 @@ app = FastAPI(title="API Interinos CLM")
 DB_PATH = "Base_Bolsa_Docente.db"
 
 # Año de convocatoria activo (se usa para detectar tablas de bolsa)
-ANIO_BOLSA = "2025"
+ANIO_BOLSA = "2026"
 
 # Tabla de disponibles semanales
-TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2025_2026"
+TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2026_2027"
 
 app.add_middleware(
     CORSMiddleware,
