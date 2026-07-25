@@ -1350,20 +1350,33 @@ def estimacion_adjudicacion(
     except ValueError:
         raise HTTPException(status_code=400, detail="Código de especialidad no válido.")
 
+    # Usar solo la tabla del curso activo
+    tabla_activa = f"adjudicaciones_{ANIO_BOLSA}_{int(ANIO_BOLSA) + 1}"
+
     with sqlite3.connect(DB_PATH) as conn:
-        union_query, cols = _union_adjudicaciones(conn)
-        if not union_query:
-            raise HTTPException(status_code=404, detail="No hay tablas de adjudicaciones.")
-        if "codigo_especialidad" not in cols or "semana" not in cols:
-            raise HTTPException(status_code=422, detail="Las tablas de adjudicaciones no contienen 'codigo_especialidad' o 'semana'.")
+        # Verificar que la tabla existe
+        existe = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tabla_activa,)
+        ).fetchone()
+        if not existe:
+            return {
+                "sin_datos_curso": True,
+                "mensaje": f"Aún no hay adjudicaciones registradas para el curso {ANIO_BOLSA}-{int(ANIO_BOLSA)+1}. "
+                           "La estimación estará disponible cuando se publiquen los primeros datos del curso.",
+            }
 
         df = pd.read_sql_query(
-            f"SELECT codigo_especialidad, semana FROM ({union_query})",
+            f"SELECT codigo_especialidad, semana FROM {tabla_activa}",
             conn
         )
 
     if df.empty:
-        raise HTTPException(status_code=404, detail="No hay datos de adjudicaciones.")
+        return {
+            "sin_datos_curso": True,
+            "mensaje": f"Aún no hay adjudicaciones registradas para el curso {ANIO_BOLSA}-{int(ANIO_BOLSA)+1}. "
+                       "La estimación estará disponible cuando se publiquen los primeros datos del curso.",
+        }
 
     # Normalizar código a entero para comparar (la tabla guarda "38", la bolsa usa "038")
     def _to_int(val):
