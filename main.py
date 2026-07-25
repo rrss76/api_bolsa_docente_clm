@@ -1167,11 +1167,10 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                     if usa_esp_por_fila:
                         # ── Tipo A: una fila por especialidad, orden_bolsa = rank dentro de esa esp ──
                         for row in rows:
-                            _, _, orden_b, _, _, cod_esp, esp_nombre = row
+                            _, _, orden_b, _, _, cod_esp, esp_nombre, tipo_persona = row
                             if not cod_esp:
                                 continue
                             orden_b = int(orden_b) if orden_b is not None else 0
-                            tipo_persona = row[7] if len(row) > 7 else 'ORDINARIA'
 
                             cnt_esp = _cnt_adelante_tipo_a(conn, t, cod_esp, orden_b, tipo_persona)
                             pos_esp = cnt_esp + 1
@@ -1193,9 +1192,8 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                     else:
                         # ── Tipo B: una fila por persona, especialidades en columna `especialidades` ──
                         row = rows[0]
-                        _, _, orden_b, especialidades_str, _, _, _ = row
+                        _, _, orden_b, especialidades_str, _, _, _, tipo_persona = row
                         orden_b = int(orden_b) if orden_b is not None else 0
-                        tipo_persona = row[7] if len(row) > 7 else 'ORDINARIA'
 
                         pos_general = _cnt_adelante_tipo_b(conn, t, orden_b, tipo_persona) + 1
 
