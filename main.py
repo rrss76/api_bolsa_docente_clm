@@ -206,14 +206,39 @@ def _tablas_adjudicaciones(conn) -> list:
 
 def _tablas_bolsas(conn) -> list:
     """Devuelve todas las tablas bolsas_YYYY_CCC del año activo, ordenadas por cuerpo."""
+    return _tablas_bolsas_anio(conn, ANIO_BOLSA)
+
+
+def _tablas_bolsas_anio(conn, anio: str) -> list:
+    """Devuelve las tablas bolsas_{anio}_CCC para el año indicado, ordenadas por cuerpo."""
     tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
-    patron = re.compile(rf"^bolsas_{ANIO_BOLSA}_(\d{{3}})$")
+    patron = re.compile(rf"^bolsas_{re.escape(anio)}_(\d{{3}})$")
     resultado = []
     for nombre in tablas["name"]:
         m = patron.match(nombre)
         if m:
             resultado.append((nombre, m.group(1)))  # (tabla, cuerpo)
     return sorted(resultado, key=lambda x: x[1])
+
+
+def _union_bolsas_all_anios(conn) -> str:
+    """UNION ALL de todas las tablas bolsas_YYYY_CCC (todos los años disponibles)."""
+    tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
+    patron = re.compile(r"^bolsas_\d{4}_\d{3}$")
+    partes = [f"SELECT * FROM {nombre}" for nombre in tablas["name"] if patron.match(nombre)]
+    return " UNION ALL ".join(partes) if partes else None
+
+
+def _anios_bolsa_disponibles(conn) -> list:
+    """Devuelve los años de convocatoria disponibles en la BD, ordenados descendentemente."""
+    tablas = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
+    patron = re.compile(r"^bolsas_(\d{4})_\d{3}$")
+    anios = set()
+    for nombre in tablas["name"]:
+        m = patron.match(nombre)
+        if m:
+            anios.add(m.group(1))
+    return sorted(anios, reverse=True)
 
 
 def _fecha_skipping_verano(fecha_inicio: date, semanas: float) -> date:
@@ -368,11 +393,19 @@ def fechas_disponibles():
     return sorted(fechas)
 
 
+@app.get("/cursos_disponibles")
+def cursos_disponibles():
+    """Devuelve los años de convocatoria disponibles en la BD."""
+    with sqlite3.connect(DB_PATH) as conn:
+        anios = _anios_bolsa_disponibles(conn)
+    return {"cursos": anios}
+
+
 @app.get("/datos_interino")
 def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino"), dni: str = Query(None, description="DNI ofuscado para identificar unívocamente al interino")):
-    """Datos de puntuación e idiomas de un interino en la bolsa inicial."""
+    """Datos de puntuación e idiomas de un interino en la bolsa inicial (todos los años)."""
     with sqlite3.connect(DB_PATH) as conn:
-        union = _union_bolsas(conn)
+        union = _union_bolsas_all_anios(conn)
         df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
 
     nombre_busqueda = normalizar_nombre(nombre)
@@ -1042,14 +1075,17 @@ def no_disponibles_adelante(
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_basica")
-def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
+def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str = Query(None)):
     """
     Versión ligera de posicion_en_fecha: solo posición general y por especialidad.
     Usa SQL COUNT en lugar de cargar toda la tabla. ~10x más rápido.
     Diseñado para el historial de posición (34 fechas en paralelo).
+    Parámetro opcional 'anio': año de la convocatoria para fecha='inicio' (ej: '2025', '2026').
+    Si no se indica, usa ANIO_BOLSA.
     """
     try:
         nombre_norm = normalizar_nombre(nombre)
+        anio_bolsa = anio if anio else ANIO_BOLSA
 
         def _parse_provs(prov_str: str) -> list:
             """Normaliza una cadena de provincias a lista de códigos de 2 dígitos."""
@@ -1071,7 +1107,7 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
             #   B) cuerpo 597/...:     una fila por persona, columna `especialidades` (varios códigos),
             #      orden_bolsa = posición global dentro del cuerpo.
             with sqlite3.connect(DB_PATH) as conn:
-                tablas_bolsa = _tablas_bolsas(conn)
+                tablas_bolsa = _tablas_bolsas_anio(conn, anio_bolsa)
                 if not tablas_bolsa:
                     raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
 
