@@ -1064,6 +1064,12 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
 
         if fecha.lower() == "inicio":
             # ── Bolsa inicial: una entrada por cuerpo donde aparezca el interino ──
+            #
+            # Dos estructuras posibles:
+            #   A) cuerpo 590/591/...: una fila por persona por especialidad,
+            #      columnas `codigo_especialidad` + `especialidad`, orden_bolsa = rank dentro de la esp.
+            #   B) cuerpo 597/...:     una fila por persona, columna `especialidades` (varios códigos),
+            #      orden_bolsa = posición global dentro del cuerpo.
             with sqlite3.connect(DB_PATH) as conn:
                 tablas_bolsa = _tablas_bolsas(conn)
                 if not tablas_bolsa:
@@ -1072,53 +1078,137 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...)):
                 # 1) Encontrar todas las tablas donde aparece el interino
                 tablas_persona = []
                 for t, cuerpo_code in tablas_bolsa:
-                    row = conn.execute(
-                        f"SELECT nombre, nombre_normalizado, orden_bolsa, especialidades, COALESCE(provincias,'') AS provincias "
-                        f"FROM {t} WHERE nombre_normalizado LIKE ? LIMIT 1",
+                    exists = conn.execute(
+                        f"SELECT 1 FROM {t} WHERE nombre_normalizado LIKE ? LIMIT 1",
                         (f"%{nombre_norm}%",)
                     ).fetchone()
-                    if row:
-                        tablas_persona.append((t, cuerpo_code, row))
+                    if exists:
+                        tablas_persona.append((t, cuerpo_code))
 
                 if not tablas_persona:
                     raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
                 # 2) Calcular posición dentro de cada cuerpo por separado
                 interinos_result = []
-                for t, cuerpo_code, row in tablas_persona:
-                    nombre_found, _, orden_b, especialidades_str, prov_str = row
-                    orden_b = int(orden_b) if orden_b is not None else 0
-                    mis_provincias = _parse_provs(prov_str or "")
+                for t, cuerpo_code in tablas_persona:
+                    # Obtener TODAS las filas del interino (puede estar en varias especialidades)
+                    rows = conn.execute(
+                        f"SELECT nombre, nombre_normalizado, orden_bolsa, "
+                        f"COALESCE(especialidades,'') AS especialidades_multi, "
+                        f"COALESCE(provincias,'') AS provincias, "
+                        f"codigo_especialidad, COALESCE(especialidad,'') AS especialidad_nombre, "
+                        f"COALESCE(tipo_bolsa_fuente,'ORDINARIA') AS tipo_bolsa "
+                        f"FROM {t} WHERE nombre_normalizado LIKE ?",
+                        (f"%{nombre_norm}%",)
+                    ).fetchall()
+                    # índices: 0=nombre, 1=nombre_norm, 2=orden_bolsa, 3=especialidades_multi,
+                    #          4=provincias, 5=codigo_especialidad, 6=especialidad_nombre, 7=tipo_bolsa
 
-                    pos_general_cnt = conn.execute(
-                        f"SELECT COUNT(DISTINCT nombre_normalizado) FROM {t} "
-                        f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
-                        (orden_b,)
-                    ).fetchone()[0]
-                    pos_general = pos_general_cnt + 1
+                    if not rows:
+                        continue
 
-                    esps = _split_especialidades(especialidades_str or "")
+                    nombre_found = rows[0][0]
+                    mis_provincias = _parse_provs(rows[0][4] or "")
+
+                    # Detectar estructura: ¿tiene codigo_especialidad? → tipo A (590/591)
+                    usa_esp_por_fila = rows[0][5] is not None
+
                     posiciones_esp = []
-                    for esp in esps:
-                        cnt_esp = conn.execute(
-                            f"SELECT COUNT(DISTINCT nombre_normalizado) FROM {t} "
-                            f"WHERE ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%' "
-                            f"AND CAST(orden_bolsa AS INTEGER) < ?",
-                            (orden_b,)
-                        ).fetchone()[0]
 
-                        por_provincia = []
-                        for prov in mis_provincias:
-                            cnt_prov = conn.execute(
+                    def _cnt_adelante_tipo_a(conn, t, cod_esp, orden_b, tipo, prov=None):
+                        """Cuenta personas por delante respetando prioridad ORDINARIA > RESERVA."""
+                        prov_filter = f"AND ',' || COALESCE(provincias,'') || ',' LIKE '%,{prov},%'" if prov else ""
+                        if tipo == 'ORDINARIA':
+                            return conn.execute(
+                                f"SELECT COUNT(*) FROM {t} "
+                                f"WHERE codigo_especialidad=? AND tipo_bolsa_fuente='ORDINARIA' "
+                                f"{prov_filter} AND CAST(orden_bolsa AS INTEGER) < ?",
+                                (cod_esp, orden_b)
+                            ).fetchone()[0]
+                        else:  # RESERVA u otro
+                            total_ord = conn.execute(
+                                f"SELECT COUNT(*) FROM {t} "
+                                f"WHERE codigo_especialidad=? AND tipo_bolsa_fuente='ORDINARIA' {prov_filter}",
+                                (cod_esp,)
+                            ).fetchone()[0]
+                            cnt_res = conn.execute(
+                                f"SELECT COUNT(*) FROM {t} "
+                                f"WHERE codigo_especialidad=? AND tipo_bolsa_fuente=? "
+                                f"{prov_filter} AND CAST(orden_bolsa AS INTEGER) < ?",
+                                (cod_esp, tipo, orden_b)
+                            ).fetchone()[0]
+                            return total_ord + cnt_res
+
+                    def _cnt_adelante_tipo_b(conn, t, orden_b, tipo, esp=None, prov=None):
+                        """Cuenta personas por delante en tablas tipo 597 (especialidades en columna)."""
+                        esp_filter = f"AND ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%'" if esp else ""
+                        prov_filter = f"AND ',' || COALESCE(provincias,'') || ',' LIKE '%,{prov},%'" if prov else ""
+                        if tipo == 'ORDINARIA':
+                            return conn.execute(
                                 f"SELECT COUNT(DISTINCT nombre_normalizado) FROM {t} "
-                                f"WHERE ',' || COALESCE(especialidades,'') || ',' LIKE '%,{esp},%' "
-                                f"AND ',' || COALESCE(provincias,'') || ',' LIKE '%,{prov},%' "
+                                f"WHERE tipo_bolsa_fuente='ORDINARIA' {esp_filter} {prov_filter} "
                                 f"AND CAST(orden_bolsa AS INTEGER) < ?",
                                 (orden_b,)
                             ).fetchone()[0]
-                            por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+                        else:
+                            total_ord = conn.execute(
+                                f"SELECT COUNT(DISTINCT nombre_normalizado) FROM {t} "
+                                f"WHERE tipo_bolsa_fuente='ORDINARIA' {esp_filter} {prov_filter}",
+                                ()
+                            ).fetchone()[0]
+                            cnt_res = conn.execute(
+                                f"SELECT COUNT(DISTINCT nombre_normalizado) FROM {t} "
+                                f"WHERE tipo_bolsa_fuente=? {esp_filter} {prov_filter} "
+                                f"AND CAST(orden_bolsa AS INTEGER) < ?",
+                                (tipo, orden_b)
+                            ).fetchone()[0]
+                            return total_ord + cnt_res
 
-                        posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
+                    if usa_esp_por_fila:
+                        # ── Tipo A: una fila por especialidad, orden_bolsa = rank dentro de esa esp ──
+                        for row in rows:
+                            _, _, orden_b, _, _, cod_esp, esp_nombre = row
+                            if not cod_esp:
+                                continue
+                            orden_b = int(orden_b) if orden_b is not None else 0
+                            tipo_persona = row[7] if len(row) > 7 else 'ORDINARIA'
+
+                            cnt_esp = _cnt_adelante_tipo_a(conn, t, cod_esp, orden_b, tipo_persona)
+                            pos_esp = cnt_esp + 1
+
+                            por_provincia = []
+                            for prov in mis_provincias:
+                                cnt_prov = _cnt_adelante_tipo_a(conn, t, cod_esp, orden_b, tipo_persona, prov)
+                                por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+
+                            posiciones_esp.append({
+                                "especialidad": cod_esp,
+                                "posicion": pos_esp,
+                                "por_provincia": por_provincia
+                            })
+
+                        # posicion_general = mejor posición entre todas sus especialidades
+                        pos_general = min((p["posicion"] for p in posiciones_esp), default=None)
+
+                    else:
+                        # ── Tipo B: una fila por persona, especialidades en columna `especialidades` ──
+                        row = rows[0]
+                        _, _, orden_b, especialidades_str, _, _, _ = row
+                        orden_b = int(orden_b) if orden_b is not None else 0
+                        tipo_persona = row[7] if len(row) > 7 else 'ORDINARIA'
+
+                        pos_general = _cnt_adelante_tipo_b(conn, t, orden_b, tipo_persona) + 1
+
+                        esps = _split_especialidades(especialidades_str or "")
+                        for esp in esps:
+                            cnt_esp = _cnt_adelante_tipo_b(conn, t, orden_b, tipo_persona, esp=esp)
+
+                            por_provincia = []
+                            for prov in mis_provincias:
+                                cnt_prov = _cnt_adelante_tipo_b(conn, t, orden_b, tipo_persona, esp=esp, prov=prov)
+                                por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+
+                            posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
 
                     interinos_result.append({
                         "nombre": nombre_found,
