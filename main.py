@@ -347,7 +347,9 @@ def buscar_nombre(query: str = Query(...)):
     qnorm = normalizar_nombre(query)
 
     with sqlite3.connect(DB_PATH) as conn:
-        union = _union_bolsas(conn)
+        union = _union_bolsas_all_anios(conn)
+        if not union:
+            return []
         df = pd.read_sql_query(
             f"SELECT nombre, orden_bolsa, cuerpo, dni_ofuscado FROM ({union});",
             conn
