@@ -1078,7 +1078,7 @@ def no_disponibles_adelante(
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_basica")
-def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str = Query(None)):
+def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str = Query(None), dni: str = Query(None)):
     """
     Versión ligera de posicion_en_fecha: solo posición general y por especialidad.
     Usa SQL COUNT en lugar de cargar toda la tabla. ~10x más rápido.
@@ -1115,11 +1115,13 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str
                     raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
 
                 # 1) Encontrar todas las tablas donde aparece el interino
+                dni_filter = "AND dni_ofuscado = ?" if dni else ""
                 tablas_persona = []
                 for t, cuerpo_code in tablas_bolsa:
+                    params_exists = (f"%{nombre_norm}%", dni) if dni else (f"%{nombre_norm}%",)
                     exists = conn.execute(
-                        f"SELECT 1 FROM {t} WHERE nombre_normalizado LIKE ? LIMIT 1",
-                        (f"%{nombre_norm}%",)
+                        f"SELECT 1 FROM {t} WHERE nombre_normalizado LIKE ? {dni_filter} LIMIT 1",
+                        params_exists
                     ).fetchone()
                     if exists:
                         tablas_persona.append((t, cuerpo_code))
@@ -1131,14 +1133,15 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str
                 interinos_result = []
                 for t, cuerpo_code in tablas_persona:
                     # Obtener TODAS las filas del interino (puede estar en varias especialidades)
+                    params_rows = (f"%{nombre_norm}%", dni) if dni else (f"%{nombre_norm}%",)
                     rows = conn.execute(
                         f"SELECT nombre, nombre_normalizado, orden_bolsa, "
                         f"COALESCE(especialidades,'') AS especialidades_multi, "
                         f"COALESCE(provincias,'') AS provincias, "
                         f"codigo_especialidad, COALESCE(especialidad,'') AS especialidad_nombre, "
                         f"COALESCE(tipo_bolsa_fuente,'ORDINARIA') AS tipo_bolsa "
-                        f"FROM {t} WHERE nombre_normalizado LIKE ?",
-                        (f"%{nombre_norm}%",)
+                        f"FROM {t} WHERE nombre_normalizado LIKE ? {dni_filter}",
+                        params_rows
                     ).fetchall()
                     # índices: 0=nombre, 1=nombre_norm, 2=orden_bolsa, 3=especialidades_multi,
                     #          4=provincias, 5=codigo_especialidad, 6=especialidad_nombre, 7=tipo_bolsa
