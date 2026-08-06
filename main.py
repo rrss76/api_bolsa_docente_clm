@@ -769,30 +769,42 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
         else:
             df["tipo_bolsa"] = 0
 
-        # ── Agrupar por persona: en tablas semanales cada especialidad es una fila ──
-        # Consolidamos todas las especialidades de la misma persona en una sola fila
-        agg_dict = {
-            "orden_bolsa": "first",
-            "tipo_bolsa":  "first",  # mismo tipo para todas las filas del mismo interino
-            "especialidades_norm": lambda x: ",".join(sorted(set(x.dropna().astype(str)))),
-            "provincias": "first",
-        }
-        for col in idiomas_cols:
-            agg_dict[col] = "first"
-
-        df = (df
-              .groupby(["nombre_normalizado", "cuerpo"], sort=False)
-              .agg({"nombre": "first", **agg_dict})
-              .reset_index())
-
-        df["provincias_list"] = df["provincias"].apply(_split_provincias)
+        # ── Vista por fila para el cálculo de posición ──
+        # IMPORTANTE: NO se colapsan las distintas filas de una misma persona en
+        # una sola antes de calcular la posición por especialidad. Cada fila de
+        # bolsa (cuerpo + especialidad + tipo_bolsa_fuente) tiene su PROPIO
+        # orden_bolsa, y no es intercambiable con el de otra especialidad de la
+        # misma persona (alguien puede ser ORDINARIA-7 en una especialidad y
+        # RESERVA-150 en otra: no se le puede "prestar" el 7 a la segunda).
         df["especialidades_list"] = df["especialidades_norm"].apply(_split_especialidades_norm)
-        df["especialidades_list_full"] = df["especialidades_list"]
+        df["provincias_list"] = df["provincias"].apply(_split_provincias)
 
-        # Ordenar: primero bolsa ordinaria (0), luego reserva (91+), dentro de cada una por orden_bolsa
-        df = df.sort_values(by=["tipo_bolsa", "orden_bolsa"]).reset_index(drop=True)
+        # Especialidades completas de cada persona (unión de todas sus filas),
+        # solo para estadísticas informativas ("tiene otras especialidades") y
+        # para saber qué especialidades listar — nunca para el orden_bolsa/tipo_bolsa.
+        especialidades_por_persona = (
+            df.groupby(["nombre_normalizado", "cuerpo"])["especialidades_list"]
+              .apply(lambda listas: sorted(set(c for lst in listas for c in lst)))
+              .reset_index(name="especialidades_list_full")
+        )
+        df = df.merge(especialidades_por_persona, on=["nombre_normalizado", "cuerpo"], how="left")
+
+        # Resumen por persona (una fila por nombre+cuerpo), solo para localizar a
+        # quién se busca y qué especialidades tiene. El ranking se calcula siempre
+        # sobre las filas originales (df_exp más abajo), no sobre este resumen.
+        resumen_cols = {"nombre": "first", "provincias_list": "first",
+                         "especialidades_list_full": "first"}
+        for col in idiomas_cols:
+            resumen_cols[col] = "first"
+
+        personas = (
+            df.groupby(["nombre_normalizado", "cuerpo"], sort=False)
+              .agg(resumen_cols)
+              .reset_index()
+        )
+
         nombre_norm = normalizar_nombre(nombre)
-        coincidencias = df[df["nombre_normalizado"].str.contains(nombre_norm, na=False)]
+        coincidencias = personas[personas["nombre_normalizado"].str.contains(nombre_norm, na=False)]
 
         if coincidencias.empty:
             raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
@@ -806,6 +818,8 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
             if c not in df.columns:
                 df[c] = ""
 
+        # df_exp: una fila por (persona, cuerpo, especialidad), con SU PROPIO
+        # orden_bolsa/tipo_bolsa — nunca el de otra especialidad de la misma persona.
         df_exp = df[cols_keep].explode("especialidades_list", ignore_index=True)
         df_exp = df_exp.rename(columns={"especialidades_list": "esp"})
         df_exp = df_exp[df_exp["esp"].notna()]
@@ -815,21 +829,20 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
         for _, interino in coincidencias.iterrows():
             nom_norm_i = interino["nombre_normalizado"]
             cuerpo_i = interino.get("cuerpo")
-            # Posición general: solo dentro del mismo cuerpo (los códigos de
-            # especialidad y orden_bolsa no son comparables entre cuerpos distintos).
-            df_cuerpo = df[df["cuerpo"] == cuerpo_i]
-            pos_general = _posicion_en(df_cuerpo, nom_norm_i)
 
-            esp_list = _split_especialidades_norm(interino.get("especialidades_norm", ""))
+            esp_list = interino.get("especialidades_list_full", []) or []
             prov_list_interino = interino["provincias_list"] if has_provincias else []
 
             posiciones_especialidad = []
+            posiciones_num = []
 
             for esp in esp_list:
                 df_esp = df_exp[
                     (df_exp["esp"] == esp) & (df_exp["cuerpo"] == cuerpo_i)
                 ].sort_values(["tipo_bolsa", "orden_bolsa"])
                 pos_esp = _posicion_en(df_esp, nom_norm_i)
+                if pos_esp:
+                    posiciones_num.append(pos_esp)
                 total_esp = int(len(df_esp))
 
                 personas_antes = df_esp.reset_index(drop=True).iloc[:max((pos_esp or 1) - 1, 0)]
@@ -898,6 +911,10 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
                     "personas_por_delante_con_otras_especialidades": personas_con_otras_especialidades,
                     "por_provincia": por_provincia
                 })
+
+            # Posición general = la mejor (menor) posición entre sus especialidades
+            # dentro de este mismo cuerpo.
+            pos_general = min(posiciones_num) if posiciones_num else None
 
             resultados.append({
                 "nombre": interino.get("nombre", ""),
