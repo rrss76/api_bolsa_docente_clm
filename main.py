@@ -41,8 +41,8 @@ def get_app_meta_dict():
     return {
         "updated_at": datetime.utcnow().isoformat() + "Z",
         "android": {
-            "latest": _env("APP_ANDROID_LATEST", "3.0.8+38"),
-            "min":    _env("APP_ANDROID_MIN",    "3.0.7+37"),
+            "latest": _env("APP_ANDROID_LATEST", "3.1.8+48"),
+            "min":    _env("APP_ANDROID_MIN",    "3.1.8+48"),
             "force":  _env("APP_ANDROID_FORCE",  "false").lower() == "true",
             "store_url": _env(
                 "APP_ANDROID_STORE_URL",
@@ -53,8 +53,8 @@ def get_app_meta_dict():
             ],
         },
         "ios": {
-            "latest": _env("APP_IOS_LATEST", "3.0.8"),
-            "min":    _env("APP_IOS_MIN",    "3.0.7"),
+            "latest": _env("APP_IOS_LATEST", "3.1.8"),
+            "min":    _env("APP_IOS_MIN",    "3.1.8"),
             "force":  _env("APP_IOS_FORCE",  "false").lower() == "true",
             "store_url": _env(
                 "APP_IOS_STORE_URL",
