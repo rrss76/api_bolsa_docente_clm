@@ -94,6 +94,17 @@ PROV_MAP = {
 }
 ALLOWED_PROV = set(PROV_MAP.keys())
 
+# Prioridad entre tipos de bolsa dentro de una misma especialidad:
+# ORDINARIA siempre por delante de RESERVA, y RESERVA siempre por delante
+# de EXTRAORDINARIA, independientemente del orden_bolsa de cada una.
+PRIORIDAD_TIPO_BOLSA = {
+    "ORDINARIA":            0,
+    "ORDINARIA_OPOSICION":  0,
+    "ORDINARIA_RENOVACION": 0,
+    "RESERVA":              1,
+    "EXTRAORDINARIA":       2,
+}
+
 
 def _split_especialidades(s: str):
     if pd.isna(s) or not str(s).strip():
@@ -748,9 +759,13 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
         else:
             df["provincias"] = ""
 
-        # ── tipo_bolsa: 0=ordinaria, 91=reserva. Si no existe, asumir 0. ──
+        # ── tipo_bolsa: prioridad numérica ORDINARIA(0) < RESERVA(1) < EXTRAORDINARIA(2). ──
         if "tipo_bolsa" in df.columns:
             df["tipo_bolsa"] = pd.to_numeric(df["tipo_bolsa"], errors="coerce").fillna(0).astype(int)
+        elif "tipo_bolsa_fuente" in df.columns:
+            df["tipo_bolsa"] = (
+                df["tipo_bolsa_fuente"].map(PRIORIDAD_TIPO_BOLSA).fillna(0).astype(int)
+            )
         else:
             df["tipo_bolsa"] = 0
 
@@ -766,7 +781,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
             agg_dict[col] = "first"
 
         df = (df
-              .groupby("nombre_normalizado", sort=False)
+              .groupby(["nombre_normalizado", "cuerpo"], sort=False)
               .agg({"nombre": "first", **agg_dict})
               .reset_index())
 
@@ -783,7 +798,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
             raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
         cols_keep = [
-            "nombre", "nombre_normalizado", "orden_bolsa", "tipo_bolsa",
+            "nombre", "nombre_normalizado", "cuerpo", "orden_bolsa", "tipo_bolsa",
             "especialidades_list", "especialidades_list_full",
             "provincias_list", "aleman", "frances", "ingles", "italiano", "leng_signos"
         ]
@@ -799,7 +814,11 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
 
         for _, interino in coincidencias.iterrows():
             nom_norm_i = interino["nombre_normalizado"]
-            pos_general = _posicion_en(df, nom_norm_i)
+            cuerpo_i = interino.get("cuerpo")
+            # Posición general: solo dentro del mismo cuerpo (los códigos de
+            # especialidad y orden_bolsa no son comparables entre cuerpos distintos).
+            df_cuerpo = df[df["cuerpo"] == cuerpo_i]
+            pos_general = _posicion_en(df_cuerpo, nom_norm_i)
 
             esp_list = _split_especialidades_norm(interino.get("especialidades_norm", ""))
             prov_list_interino = interino["provincias_list"] if has_provincias else []
@@ -807,7 +826,9 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
             posiciones_especialidad = []
 
             for esp in esp_list:
-                df_esp = df_exp[df_exp["esp"] == esp].sort_values(["tipo_bolsa", "orden_bolsa"])
+                df_esp = df_exp[
+                    (df_exp["esp"] == esp) & (df_exp["cuerpo"] == cuerpo_i)
+                ].sort_values(["tipo_bolsa", "orden_bolsa"])
                 pos_esp = _posicion_en(df_esp, nom_norm_i)
                 total_esp = int(len(df_esp))
 
@@ -881,6 +902,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
             resultados.append({
                 "nombre": interino.get("nombre", ""),
                 "nombre_normalizado": nom_norm_i,
+                "cuerpo": cuerpo_i,
                 "posicion_general": pos_general,
                 "posiciones_por_especialidad": posiciones_especialidad
             })
