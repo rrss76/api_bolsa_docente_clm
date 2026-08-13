@@ -1103,10 +1103,21 @@ def no_disponibles_adelante(
             for esp, cnt in sorted(esp_counts.items(), key=lambda x: -x[1])
         ]
 
+        # DEBUG TEMPORAL - borrar tras diagnóstico
+        sample_ahead = list(ahead_esps.items())[:3]
+        cols_debug = list(cols_bolsa)
         return {
             "fecha": fecha,
             "total_no_disponibles_por_delante": len(no_disp),
             "por_especialidad": resumen_especialidad,
+            "_debug": {
+                "user_tabla": user_tabla,
+                "cols_bolsa": cols_debug,
+                "tiene_esps": tiene_esps,
+                "tiene_cod": tiene_cod,
+                "sample_ahead_esps": [(nn, list(esps)) for nn, esps in sample_ahead],
+                "esp_counts": esp_counts,
+            },
         }
 
 # ─────────────────────────────────────────────
