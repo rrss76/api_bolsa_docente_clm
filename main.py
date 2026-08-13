@@ -1048,60 +1048,49 @@ def no_disponibles_adelante(
         tiene_cod  = "codigo_especialidad" in cols_bolsa
         tiene_esps = "especialidades" in cols_bolsa
 
-        # Comprobar si codigo_especialidad tiene datos reales (Tipo A) o es NULL (Tipo B)
-        usa_codigo = False
-        if tiene_cod:
-            sample = conn.execute(
-                f"SELECT codigo_especialidad FROM {user_tabla} "
-                f"WHERE codigo_especialidad IS NOT NULL AND codigo_especialidad != '' LIMIT 1"
-            ).fetchone()
-            usa_codigo = sample is not None
-
-        if usa_codigo:
-            # Tipo A: una fila por especialidad; agrupamos por persona y normalizamos a 3 dígitos.
-            rows_ahead_raw = conn.execute(
-                f"SELECT nombre_normalizado, COALESCE(codigo_especialidad,'') FROM {user_tabla} "
-                f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
-                (user_orden,)
-            ).fetchall()
-            ahead_esps: dict = {}
-            for nn, cod_raw in rows_ahead_raw:
-                if nn not in ahead_esps:
-                    ahead_esps[nn] = set()
-                try:
-                    c = str(int(float(cod_raw))).zfill(3) if cod_raw else ""
-                    if c and c != "000":
-                        ahead_esps[nn].add(c)
-                except Exception:
-                    pass
-        elif tiene_esps:
-            # Tipo B: una fila por persona, especialidades en columna CSV.
-            # Los códigos pueden ser con o sin cero inicial ("031" o "31"),
-            # por lo que usamos re.findall(r"\d+") y normalizamos con zfill(3).
-            rows_ahead_raw = conn.execute(
-                f"SELECT nombre_normalizado, COALESCE(especialidades,'') FROM {user_tabla} "
-                f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
-                (user_orden,)
-            ).fetchall()
-            ahead_esps: dict = {}
-            for nn, esp_str in rows_ahead_raw:
-                if nn not in ahead_esps:
-                    ahead_esps[nn] = set()
-                for raw_cod in re.findall(r"\d+", esp_str):
+        # Algunas tablas (ej: bolsas_2026_597) tienen esquema MIXTO: unas filas usan
+        # 'especialidades' (CSV "031,037,038") y otras usan 'codigo_especialidad' (entero).
+        # Siempre leemos AMBAS columnas y combinamos lo que haya en cada fila.
+        def _esp_set_from_row(esp_str: str, cod_raw: str) -> set:
+            result = set()
+            # Desde columna especialidades (CSV, con o sin cero inicial)
+            if esp_str:
+                for raw in re.findall(r"\d+", esp_str):
                     try:
-                        n = int(raw_cod)
+                        n = int(raw)
                         if 1 <= n <= 999:
-                            ahead_esps[nn].add(str(n).zfill(3))
+                            result.add(str(n).zfill(3))
                     except Exception:
                         pass
-        else:
-            # Sin columna de especialidad conocida
-            rows_ahead_raw = conn.execute(
-                f"SELECT DISTINCT nombre_normalizado FROM {user_tabla} "
-                f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
-                (user_orden,)
-            ).fetchall()
-            ahead_esps = {nn: set() for (nn,) in rows_ahead_raw}
+            # Desde columna codigo_especialidad (entero)
+            if cod_raw:
+                try:
+                    n = int(float(cod_raw))
+                    if 1 <= n <= 999:
+                        result.add(str(n).zfill(3))
+                except Exception:
+                    pass
+            return result
+
+        select_esps = (
+            f"COALESCE(especialidades,''), COALESCE(codigo_especialidad,'')"
+            if tiene_esps and tiene_cod else
+            f"COALESCE(especialidades,''), ''" if tiene_esps else
+            f"'', COALESCE(codigo_especialidad,'')" if tiene_cod else
+            f"'', ''"
+        )
+
+        rows_ahead_raw = conn.execute(
+            f"SELECT nombre_normalizado, {select_esps} FROM {user_tabla} "
+            f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
+            (user_orden,)
+        ).fetchall()
+
+        ahead_esps: dict = {}
+        for nn, esp_str, cod_raw in rows_ahead_raw:
+            if nn not in ahead_esps:
+                ahead_esps[nn] = set()
+            ahead_esps[nn].update(_esp_set_from_row(esp_str, cod_raw))
 
         # ── 5) No disponibles = no en disponibles Y no adjudicados ───────────
         no_disp = {
