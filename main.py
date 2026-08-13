@@ -1125,18 +1125,26 @@ def no_disponibles_adelante(
         ]
 
         # DEBUG TEMPORAL - borrar tras diagnóstico
-        sample_ahead = list(ahead_esps.items())[:3]
-        cols_debug = list(cols_bolsa)
+        raw_sample = conn.execute(
+            f"SELECT nombre_normalizado, especialidades, codigo_especialidad "
+            f"FROM {user_tabla} WHERE CAST(orden_bolsa AS INTEGER) < ? "
+            f"ORDER BY orden_bolsa ASC LIMIT 5",
+            (user_orden,)
+        ).fetchall()
+        user_raw = conn.execute(
+            f"SELECT nombre_normalizado, especialidades, codigo_especialidad, orden_bolsa "
+            f"FROM {user_tabla} WHERE nombre_normalizado LIKE ? ORDER BY orden_bolsa ASC LIMIT 1",
+            (f"%{nombre_norm}%",)
+        ).fetchone()
         return {
             "fecha": fecha,
             "total_no_disponibles_por_delante": len(no_disp),
             "por_especialidad": resumen_especialidad,
             "_debug": {
                 "user_tabla": user_tabla,
-                "cols_bolsa": cols_debug,
-                "tiene_esps": tiene_esps,
-                "tiene_cod": tiene_cod,
-                "sample_ahead_esps": [(nn, list(esps)) for nn, esps in sample_ahead],
+                "usa_codigo": usa_codigo,
+                "user_raw": list(user_raw) if user_raw else None,
+                "raw_sample_ahead": [list(r) for r in raw_sample],
                 "esp_counts": esp_counts,
             },
         }
