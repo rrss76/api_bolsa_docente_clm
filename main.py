@@ -939,7 +939,8 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
 @app.get("/no_disponibles_adelante")
 def no_disponibles_adelante(
     nombre: str = Query(...),
-    fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD'")
+    fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD'"),
+    cuerpo: str = Query(None, description="Cuerpo del aspirante (ej: '597'). Opcional pero recomendado.")
 ):
     """
     No disponibles por delante del aspirante en una fecha concreta.
@@ -985,20 +986,23 @@ def no_disponibles_adelante(
 
         user_tabla = None
         user_orden = None
-        user_esps = set()
         user_cuerpo = None
+
+        # Si se pasa cuerpo, buscar solo en la tabla de ese cuerpo
+        cuerpo_norm = (cuerpo or "").lstrip("0") or "0"  # '0597' → '597'
+        if cuerpo_norm != "0":
+            tablas_bolsa = [t for t in tablas_bolsa if t.endswith(f"_{cuerpo_norm}")]
 
         for t in tablas_bolsa:
             row = conn.execute(
-                f"SELECT CAST(orden_bolsa AS INTEGER), especialidades, cuerpo "
+                f"SELECT CAST(orden_bolsa AS INTEGER), cuerpo "
                 f"FROM {t} WHERE nombre_normalizado LIKE ? ORDER BY orden_bolsa ASC LIMIT 1",
                 (f"%{nombre_norm}%",)
             ).fetchone()
             if row:
                 user_tabla = t
                 user_orden = int(row[0])
-                user_esps = set(_split_especialidades(str(row[1] or "")))
-                user_cuerpo = str(row[2] or "")
+                user_cuerpo = str(row[1] or "")
                 break
 
         if user_tabla is None:
@@ -1037,27 +1041,24 @@ def no_disponibles_adelante(
             }
 
         # ── 4) Personas por delante con sus especialidades ───────────────────
-        # Detectar esquema: Tipo B (597) usa columna 'especialidades' (una fila/persona),
-        # Tipo A (590/591) usa 'codigo_especialidad' (una fila/especialidad/persona).
+        # Detectar esquema usando la primera fila real de datos:
+        #   Tipo A (590/591): codigo_especialidad no es NULL → una fila por especialidad
+        #   Tipo B (597):     codigo_especialidad es NULL   → especialidades en columna CSV
         cols_bolsa = {r[1] for r in conn.execute(f"PRAGMA table_info({user_tabla})").fetchall()}
-        tiene_esps = "especialidades" in cols_bolsa
         tiene_cod  = "codigo_especialidad" in cols_bolsa
+        tiene_esps = "especialidades" in cols_bolsa
 
-        if tiene_esps:
-            # Tipo B: una fila por persona, especialidades en columna CSV "031,037,038"
-            rows_ahead_raw = conn.execute(
-                f"SELECT nombre_normalizado, COALESCE(especialidades,'') FROM {user_tabla} "
-                f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
-                (user_orden,)
-            ).fetchall()
-            # Una persona puede tener varias filas si tiene varias entradas; agrupamos.
-            ahead_esps: dict = {}
-            for nn, esp_str in rows_ahead_raw:
-                if nn not in ahead_esps:
-                    ahead_esps[nn] = set()
-                ahead_esps[nn].update(_split_especialidades(esp_str))
-        elif tiene_cod:
-            # Tipo A: una fila por especialidad; agrupamos por persona y normalizamos código.
+        # Comprobar si codigo_especialidad tiene datos reales (Tipo A) o es NULL (Tipo B)
+        usa_codigo = False
+        if tiene_cod:
+            sample = conn.execute(
+                f"SELECT codigo_especialidad FROM {user_tabla} "
+                f"WHERE codigo_especialidad IS NOT NULL AND codigo_especialidad != '' LIMIT 1"
+            ).fetchone()
+            usa_codigo = sample is not None
+
+        if usa_codigo:
+            # Tipo A: una fila por especialidad; agrupamos por persona y normalizamos a 3 dígitos.
             rows_ahead_raw = conn.execute(
                 f"SELECT nombre_normalizado, COALESCE(codigo_especialidad,'') FROM {user_tabla} "
                 f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
@@ -1073,6 +1074,18 @@ def no_disponibles_adelante(
                         ahead_esps[nn].add(c)
                 except Exception:
                     pass
+        elif tiene_esps:
+            # Tipo B: una fila por persona, especialidades en columna CSV "031,037,038"
+            rows_ahead_raw = conn.execute(
+                f"SELECT nombre_normalizado, COALESCE(especialidades,'') FROM {user_tabla} "
+                f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
+                (user_orden,)
+            ).fetchall()
+            ahead_esps: dict = {}
+            for nn, esp_str in rows_ahead_raw:
+                if nn not in ahead_esps:
+                    ahead_esps[nn] = set()
+                ahead_esps[nn].update(_split_especialidades(esp_str))
         else:
             # Sin columna de especialidad conocida
             rows_ahead_raw = conn.execute(
