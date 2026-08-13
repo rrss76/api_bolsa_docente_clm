@@ -938,58 +938,42 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
 
 @app.get("/no_disponibles_adelante")
 def no_disponibles_adelante(
-    nombre: str = Query(..., description="Nombre del aspirante (se normaliza internamente)"),
+    nombre: str = Query(...),
     fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD'")
 ):
     """
-    Devuelve los 'No Disponibles' por delante del aspirante en la fecha indicada.
-    Criterio: en bolsa del MISMO cuerpo, NO disponibles esa semana, NO adjudicados este curso.
+    No disponibles por delante del aspirante en una fecha concreta.
 
-    Mejoras v3 (enfoque híbrido, ~10x más rápido que v2):
-      - Solo se consulta la tabla de bolsa del cuerpo del aspirante (no unión de todos).
-      - Sets Python para disponibles y adjudicados (sin función SQLite custom).
-      - Disponibles filtrados por cuerpo usando el índice (cuerpo, semana).
-      - Solo adjudicaciones del curso activo (ANIO_BOLSA / ANIO_BOLSA+1).
-      - explode() para resumen por especialidad (vectorizado).
-      - Desglose por provincia cuando hay datos.
+    Lógica:
+      - Busca al aspirante en su tabla de bolsa ordinaria (bolsas_ANIO_cuerpo).
+      - Obtiene todas las personas con orden_bolsa < el suyo (misma tabla, mismo cuerpo).
+      - Disponibles esa fecha = nombres en interinos_YYYYMMDD.
+      - Adjudicados = nombres en adjudicaciones_ANIO_ANIO+1.
+      - No disponibles = los de delante que NO están en ninguna de las dos listas.
+      - Devuelve el total y el desglose por especialidad (solo las especialidades
+        del propio aspirante, para saber cuántos no disponibles le afectan).
     """
     nombre_norm = normalizar_nombre(nombre)
 
     try:
-        dt = datetime.strptime(fecha, "%Y-%m-%d")
-        fecha_bd = dt.strftime("%d/%m/%Y")
-        # Semana ISO para usar el índice (cuerpo, semana)
-        semana_iso = dt.strftime("%G-W%V")
+        datetime.strptime(fecha, "%Y-%m-%d")
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
 
-    # Determinar la tabla de disponibles semanales según el curso escolar de la fecha.
-    # El curso empieza en agosto: sep-jul → anio_inicio / anio_inicio+1
-    anio_inicio_disp = dt.year if dt.month >= 8 else dt.year - 1
-    tabla_disp = f"disponibles_semanales_{anio_inicio_disp}_{anio_inicio_disp + 1}"
-
-    tabla_adj_activa = f"adjudicaciones_{ANIO_BOLSA}_{int(ANIO_BOLSA) + 1}"
+    tabla_interinos = _nombre_tabla_interinos(fecha)   # e.g. interinos_20250919
+    tabla_adj = f"adjudicaciones_{ANIO_BOLSA}_{int(ANIO_BOLSA) + 1}"
 
     with sqlite3.connect(DB_PATH) as conn:
 
-        # ── 0) Verificar que existe la tabla y datos para esa semana ──────
-        tabla_disp_existe = conn.execute(
+        # ── 0) Verificar que existe la tabla de interinos para esa fecha ──────
+        if not conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (tabla_disp,)
-        ).fetchone()
-        if not tabla_disp_existe:
+            (tabla_interinos,)
+        ).fetchone():
             raise HTTPException(status_code=404,
-                detail=f"No hay datos de disponibles para el curso {anio_inicio_disp}-{anio_inicio_disp + 1}.")
-        cnt = conn.execute(
-            f"SELECT COUNT(*) FROM {tabla_disp} WHERE semana=?",
-            (semana_iso,)
-        ).fetchone()[0]
-        if cnt == 0:
-            raise HTTPException(status_code=404,
-                detail=f"No hay datos de disponibles para la fecha '{fecha}'.")
+                detail=f"No existe datos para la fecha '{fecha}'.")
 
-        # ── 1) Localizar al usuario en SU tabla de bolsa ──────────────────
-        #    Buscamos en cada tabla de bolsa hasta encontrarlo.
+        # ── 1) Localizar al aspirante en su tabla de bolsa ────────────────────
         tablas_bolsa = sorted(
             r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE ?",
@@ -997,130 +981,101 @@ def no_disponibles_adelante(
             ).fetchall()
         )
         if not tablas_bolsa:
-            raise HTTPException(status_code=404, detail="La bolsa inicial está vacía.")
+            raise HTTPException(status_code=404, detail="No se encontraron tablas de bolsa.")
 
-        user_fila = None
         user_tabla = None
+        user_orden = None
+        user_esps = set()
         user_cuerpo = None
+
         for t in tablas_bolsa:
             row = conn.execute(
-                f"SELECT nombre_normalizado, nombre, CAST(orden_bolsa AS INTEGER), "
-                f"especialidades, provincias, cuerpo "
+                f"SELECT CAST(orden_bolsa AS INTEGER), especialidades, cuerpo "
                 f"FROM {t} WHERE nombre_normalizado LIKE ? ORDER BY orden_bolsa ASC LIMIT 1",
                 (f"%{nombre_norm}%",)
             ).fetchone()
             if row:
-                user_fila = row
                 user_tabla = t
-                user_cuerpo = str(row[5])
+                user_orden = int(row[0])
+                user_esps = set(_split_especialidades(str(row[1] or "")))
+                user_cuerpo = str(row[2] or "")
                 break
 
-        if user_fila is None:
-            raise HTTPException(status_code=404,
-                detail="No se encontró el aspirante en la bolsa inicial.")
+        if user_tabla is None:
+            raise HTTPException(status_code=404, detail="Aspirante no encontrado en la bolsa.")
 
-        user_nom_norm    = str(user_fila[0])
-        user_nom_display = str(user_fila[1])
-        user_orden       = int(user_fila[2])
-        user_esps        = str(user_fila[3] or "")
-        user_provs       = set(_split_provincias(str(user_fila[4] or "")))
+        # ── 2) Set de disponibles (tabla interinos_YYYYMMDD) ──────────────────
+        # Detectar si la tabla tiene columna cuerpo para filtrar con precisión.
+        cols_interinos = {r[1] for r in conn.execute(f"PRAGMA table_info({tabla_interinos})").fetchall()}
+        user_cuerpo_strip = user_cuerpo.lstrip("0") or "0"  # '0597' → '597'
 
-        # ── 2) Set de disponibles (solo mismo cuerpo, vía índice semana+cuerpo) ──
-        nombres_disp = {
-            normalizar_nombre(r[0]) for r in conn.execute(
-                f"SELECT nombre FROM {tabla_disp} WHERE semana=? AND cuerpo=?",
-                (semana_iso, user_cuerpo)
+        if "cuerpo" in cols_interinos:
+            # Filtrar por cuerpo (con y sin cero inicial, por seguridad)
+            rows_disp = conn.execute(
+                f"SELECT nombre FROM {tabla_interinos} "
+                f"WHERE LTRIM(cuerpo, '0') = ? OR cuerpo = ?",
+                (user_cuerpo_strip, user_cuerpo)
             ).fetchall()
-        }
+        else:
+            # Esquema antiguo sin columna cuerpo: tomamos todos los nombres
+            rows_disp = conn.execute(
+                f"SELECT nombre FROM {tabla_interinos}"
+            ).fetchall()
 
-        # ── 3) Set de adjudicados (solo curso activo) ─────────────────────
-        tablas_existentes = {r[0] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ).fetchall()}
-        if tabla_adj_activa in tablas_existentes:
+        nombres_disp = {normalizar_nombre(r[0]) for r in rows_disp}
+
+        # ── 3) Set de adjudicados este curso ──────────────────────────────────
+        nombres_adj = set()
+        if conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tabla_adj,)
+        ).fetchone():
             nombres_adj = {
                 normalizar_nombre(r[0]) for r in conn.execute(
-                    f"SELECT DISTINCT nombre FROM {tabla_adj_activa}"
+                    f"SELECT DISTINCT nombre FROM {tabla_adj}"
                 ).fetchall()
             }
-        else:
-            nombres_adj = set()
 
-        # ── 4) Filas de bolsa por delante (mismo cuerpo) ──────────────────
+        # ── 4) Personas por delante en la misma bolsa ─────────────────────────
         rows_ahead = conn.execute(
-            f"SELECT nombre_normalizado, especialidades, provincias, CAST(orden_bolsa AS INTEGER) "
-            f"FROM {user_tabla} WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
+            f"SELECT nombre_normalizado, especialidades FROM {user_tabla} "
+            f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
             (user_orden,)
         ).fetchall()
 
-        # ── 5) Filtrar no-disponibles con sets Python ─────────────────────
-        no_disp_rows = [
-            (nn, esp, prov, ord_b)
-            for nn, esp, prov, ord_b in rows_ahead
+        # ── 5) No disponibles = no en disponibles Y no adjudicados ───────────
+        no_disp = [
+            (nn, esp)
+            for nn, esp in rows_ahead
             if nn not in nombres_disp and nn not in nombres_adj
         ]
 
-        # ── 6) Posición del usuario en disponibles de esa semana ──────────
-        en_disp = user_nom_norm in nombres_disp
-        if en_disp:
-            pos_en_disp = conn.execute(
-                f"SELECT COUNT(*) FROM {tabla_disp} "
-                f"WHERE semana=? AND cuerpo=? AND CAST(orden_bolsa AS INTEGER) < ("
-                f"  SELECT CAST(orden_bolsa AS INTEGER) FROM {tabla_disp} "
-                f"  WHERE semana=? AND cuerpo=? AND nombre LIKE ? LIMIT 1"
-                f")",
-                (semana_iso, user_cuerpo, semana_iso, user_cuerpo, f"%{nombre_norm[-10:]}%")
-            ).fetchone()[0]
-            posicion_semana = int(pos_en_disp) + 1
-        else:
-            posicion_semana = None
-
-        # ── 7) Resumen por especialidad con explode ───────────────────────
-        if no_disp_rows:
+        # ── 6) Desglose por especialidad del aspirante ────────────────────────
+        # Solo contamos las especialidades que el propio aspirante tiene,
+        # para saber cuántos no disponibles le afectan en cada una de ellas.
+        resumen_especialidad = []
+        if no_disp and user_esps:
             import pandas as _pd
-            df_no = _pd.DataFrame(no_disp_rows, columns=["nn", "especialidades", "provincias", "orden_bolsa"])
-            df_no["esp_list"] = df_no["especialidades"].fillna("").apply(_split_especialidades)
-            exploded = df_no.explode("esp_list")
-            exploded = exploded[exploded["esp_list"].notna() & (exploded["esp_list"] != "")]
+            df_nd = _pd.DataFrame(no_disp, columns=["nn", "especialidades"])
+            df_nd["esp_list"] = df_nd["especialidades"].fillna("").apply(_split_especialidades)
+            exploded = df_nd.explode("esp_list")
+            exploded = exploded[
+                exploded["esp_list"].notna() &
+                (exploded["esp_list"] != "") &
+                exploded["esp_list"].isin(user_esps)
+            ]
             if not exploded.empty:
                 vc = exploded["esp_list"].value_counts()
                 resumen_especialidad = [
                     {"especialidad": esp, "count": int(cnt)}
                     for esp, cnt in vc.items()
                 ]
-            else:
-                resumen_especialidad = []
-
-            # ── 8) Desglose por provincia ──────────────────────────────────
-            df_no["prov_list"] = df_no["provincias"].fillna("").apply(_split_provincias)
-            resumen_provincia = {
-                prov: int(df_no["prov_list"].apply(lambda lst: prov in lst).sum())
-                for prov in ALLOWED_PROV
-            }
-        else:
-            resumen_especialidad = []
-            resumen_provincia = {prov: 0 for prov in ALLOWED_PROV}
 
         return {
             "fecha": fecha,
-            "fecha_bd": fecha_bd,
-            "usuario": {
-                "nombre": user_nom_display,
-                "nombre_normalizado": user_nom_norm,
-                "orden_bolsa": user_orden,
-                "cuerpo": user_cuerpo,
-                "tabla_bolsa": user_tabla,
-                "posicion_en_lista_semana": posicion_semana,
-                "especialidades": user_esps,
-                "provincias": list(user_provs),
-            },
-            "resumen": {
-                "total_no_disponibles_por_delante": len(no_disp_rows),
-                "por_especialidad": resumen_especialidad,
-                "por_provincia": resumen_provincia,
-            },
+            "total_no_disponibles_por_delante": len(no_disp),
+            "por_especialidad": resumen_especialidad,
         }
-
 
 # ─────────────────────────────────────────────
 # ESTIMACIÓN DE ADJUDICACIÓN
