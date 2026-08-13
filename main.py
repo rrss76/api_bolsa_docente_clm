@@ -1036,40 +1036,72 @@ def no_disponibles_adelante(
                 ).fetchall()
             }
 
-        # ── 4) Personas por delante en la misma bolsa ─────────────────────────
-        rows_ahead = conn.execute(
-            f"SELECT nombre_normalizado, especialidades FROM {user_tabla} "
-            f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
-            (user_orden,)
-        ).fetchall()
+        # ── 4) Personas por delante con sus especialidades ───────────────────
+        # Detectar esquema: Tipo B (597) usa columna 'especialidades' (una fila/persona),
+        # Tipo A (590/591) usa 'codigo_especialidad' (una fila/especialidad/persona).
+        cols_bolsa = {r[1] for r in conn.execute(f"PRAGMA table_info({user_tabla})").fetchall()}
+        tiene_esps = "especialidades" in cols_bolsa
+        tiene_cod  = "codigo_especialidad" in cols_bolsa
+
+        if tiene_esps:
+            # Tipo B: una fila por persona, especialidades en columna CSV "031,037,038"
+            rows_ahead_raw = conn.execute(
+                f"SELECT nombre_normalizado, COALESCE(especialidades,'') FROM {user_tabla} "
+                f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
+                (user_orden,)
+            ).fetchall()
+            # Una persona puede tener varias filas si tiene varias entradas; agrupamos.
+            ahead_esps: dict = {}
+            for nn, esp_str in rows_ahead_raw:
+                if nn not in ahead_esps:
+                    ahead_esps[nn] = set()
+                ahead_esps[nn].update(_split_especialidades(esp_str))
+        elif tiene_cod:
+            # Tipo A: una fila por especialidad; agrupamos por persona y normalizamos código.
+            rows_ahead_raw = conn.execute(
+                f"SELECT nombre_normalizado, COALESCE(codigo_especialidad,'') FROM {user_tabla} "
+                f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
+                (user_orden,)
+            ).fetchall()
+            ahead_esps: dict = {}
+            for nn, cod_raw in rows_ahead_raw:
+                if nn not in ahead_esps:
+                    ahead_esps[nn] = set()
+                try:
+                    c = str(int(float(cod_raw))).zfill(3) if cod_raw else ""
+                    if c and c != "000":
+                        ahead_esps[nn].add(c)
+                except Exception:
+                    pass
+        else:
+            # Sin columna de especialidad conocida
+            rows_ahead_raw = conn.execute(
+                f"SELECT DISTINCT nombre_normalizado FROM {user_tabla} "
+                f"WHERE CAST(orden_bolsa AS INTEGER) < ?",
+                (user_orden,)
+            ).fetchall()
+            ahead_esps = {nn: set() for (nn,) in rows_ahead_raw}
 
         # ── 5) No disponibles = no en disponibles Y no adjudicados ───────────
-        no_disp = [
-            (nn, esp)
-            for nn, esp in rows_ahead
+        no_disp = {
+            nn: esps
+            for nn, esps in ahead_esps.items()
             if nn not in nombres_disp and nn not in nombres_adj
-        ]
+        }
 
-        # ── 6) Desglose por especialidad del aspirante ────────────────────────
-        # Solo contamos las especialidades que el propio aspirante tiene,
-        # para saber cuántos no disponibles le afectan en cada una de ellas.
-        resumen_especialidad = []
-        if no_disp and user_esps:
-            import pandas as _pd
-            df_nd = _pd.DataFrame(no_disp, columns=["nn", "especialidades"])
-            df_nd["esp_list"] = df_nd["especialidades"].fillna("").apply(_split_especialidades)
-            exploded = df_nd.explode("esp_list")
-            exploded = exploded[
-                exploded["esp_list"].notna() &
-                (exploded["esp_list"] != "") &
-                exploded["esp_list"].isin(user_esps)
-            ]
-            if not exploded.empty:
-                vc = exploded["esp_list"].value_counts()
-                resumen_especialidad = [
-                    {"especialidad": esp, "count": int(cnt)}
-                    for esp, cnt in vc.items()
-                ]
+        # ── 6) Desglose por especialidad ──────────────────────────────────────
+        # Devolvemos TODAS las especialidades de los no-disponibles.
+        # Flutter filtra automáticamente mostrando solo las especialidades
+        # que el propio aspirante tiene en su lista de posiciones (_posDetallada).
+        esp_counts: dict = {}
+        for nn, esps in no_disp.items():
+            for esp in esps:
+                esp_counts[esp] = esp_counts.get(esp, 0) + 1
+
+        resumen_especialidad = [
+            {"especialidad": esp, "count": cnt}
+            for esp, cnt in sorted(esp_counts.items(), key=lambda x: -x[1])
+        ]
 
         return {
             "fecha": fecha,
