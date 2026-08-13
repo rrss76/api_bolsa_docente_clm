@@ -1075,7 +1075,9 @@ def no_disponibles_adelante(
                 except Exception:
                     pass
         elif tiene_esps:
-            # Tipo B: una fila por persona, especialidades en columna CSV "031,037,038"
+            # Tipo B: una fila por persona, especialidades en columna CSV.
+            # Los códigos pueden ser con o sin cero inicial ("031" o "31"),
+            # por lo que usamos re.findall(r"\d+") y normalizamos con zfill(3).
             rows_ahead_raw = conn.execute(
                 f"SELECT nombre_normalizado, COALESCE(especialidades,'') FROM {user_tabla} "
                 f"WHERE CAST(orden_bolsa AS INTEGER) < ? ORDER BY orden_bolsa ASC",
@@ -1085,7 +1087,13 @@ def no_disponibles_adelante(
             for nn, esp_str in rows_ahead_raw:
                 if nn not in ahead_esps:
                     ahead_esps[nn] = set()
-                ahead_esps[nn].update(_split_especialidades(esp_str))
+                for raw_cod in re.findall(r"\d+", esp_str):
+                    try:
+                        n = int(raw_cod)
+                        if 1 <= n <= 999:
+                            ahead_esps[nn].add(str(n).zfill(3))
+                    except Exception:
+                        pass
         else:
             # Sin columna de especialidad conocida
             rows_ahead_raw = conn.execute(
