@@ -1094,10 +1094,27 @@ def no_disponibles_adelante(
             ahead_esps[nn].update(_esp_set_from_row(esp_str, cod_raw))
 
         # ── 5) No disponibles = no en disponibles Y no adjudicados ───────────
+        # IMPORTANTE: los nombres en adjudicaciones pueden estar truncados porque
+        # el PDF de vacantes corta los nombres largos (ej: "BARDERA GUADAMILLAS,
+        # MARIA DEL CARMEN" aparece como "BARDERA GUADAMILLAS, MARIA DEL").
+        # Por eso usamos startswith además de igualdad exacta: si el nombre
+        # del aspirante empieza por algún nombre de adjudicaciones (min 10 chars),
+        # se considera adjudicado.
+        _MIN_PREFIX = 10
+
+        def _es_adjudicado(nombre_norm: str) -> bool:
+            if nombre_norm in nombres_adj:
+                return True
+            return any(
+                nombre_norm.startswith(adj)
+                for adj in nombres_adj
+                if len(adj) >= _MIN_PREFIX
+            )
+
         no_disp = {
             nn: esps
             for nn, esps in ahead_esps.items()
-            if nn not in nombres_disp and nn not in nombres_adj
+            if nn not in nombres_disp and not _es_adjudicado(nn)
         }
 
         # ── 6) Desglose por especialidad ──────────────────────────────────────
