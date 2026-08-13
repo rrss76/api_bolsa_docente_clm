@@ -1315,60 +1315,152 @@ def posicion_basica(nombre: str = Query(...), fecha: str = Query(...), anio: str
                 if not chk:
                     raise HTTPException(status_code=404, detail=f"No existen datos para la fecha '{fecha}'.")
 
-                rows = conn.execute(
-                    f"SELECT nombre, tipo_bolsa, orden_bolsa, codigo_especialidad, COALESCE(provincias,'') "
-                    f"FROM {tabla} WHERE nombre LIKE ?",
-                    (f"%{nombre_norm}%",)
-                ).fetchall()
+                # Detectar esquema de la tabla (nuevo vs antiguo)
+                cols_tabla = [r[1] for r in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
+                esquema_nuevo = "tipo_bolsa_fuente" in cols_tabla  # nuevo pipeline
 
-                if not rows:
-                    raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
+                if esquema_nuevo:
+                    # ── Esquema nuevo: tipo_bolsa_fuente, cuerpo, especialidades ──
+                    rows = conn.execute(
+                        f"SELECT nombre, tipo_bolsa_fuente, orden_bolsa, codigo_especialidad, "
+                        f"cuerpo, COALESCE(especialidades,'') "
+                        f"FROM {tabla} WHERE nombre LIKE ?",
+                        (f"%{nombre_norm}%",)
+                    ).fetchall()
+                    # índices: 0=nombre, 1=tipo_bolsa_fuente, 2=orden_bolsa,
+                    #          3=codigo_especialidad, 4=cuerpo, 5=especialidades
 
-                nombre_found = rows[0][0]
-                tipo_b  = rows[0][1]
-                orden_b = rows[0][2]
-                mis_provincias = _parse_provs(rows[0][4] or "")
+                    if not rows:
+                        raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
 
-                pos_general_cnt = conn.execute(f"""
-                    SELECT COUNT(DISTINCT nombre) FROM {tabla}
-                    WHERE (CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
-                       OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?)
-                """, (tipo_b, tipo_b, orden_b)).fetchone()[0]
-                pos_general = pos_general_cnt + 1
+                    nombre_found = rows[0][0]
 
-                esps = sorted(set(str(r[3]).zfill(3) for r in rows if r[3]))
-                posiciones_esp = []
-                for esp in esps:
-                    cnt_esp = conn.execute(f"""
+                    # Agrupar por cuerpo (puede aparecer en varios)
+                    cuerpos_rows: dict = {}
+                    for r in rows:
+                        c = (r[4] or "").lstrip("0") or "0"
+                        cuerpos_rows.setdefault(c, []).append(r)
+
+                    interinos_result = []
+                    for cuerpo_code, c_rows in sorted(cuerpos_rows.items()):
+                        r0 = c_rows[0]
+                        tipo_fuente = r0[1] or "ORDINARIA"
+                        orden_b = int(r0[2]) if r0[2] is not None else 0
+
+                        # Posición general dentro del mismo cuerpo y tipo de bolsa
+                        pos_cnt = conn.execute(f"""
+                            SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                            WHERE cuerpo = ?
+                              AND tipo_bolsa_fuente = ?
+                              AND CAST(orden_bolsa AS INTEGER) < ?
+                        """, (r0[4], tipo_fuente, orden_b)).fetchone()[0]
+                        pos_general = pos_cnt + 1
+
+                        posiciones_esp = []
+                        usa_esp_fila = r0[3] is not None  # Tipo A: código_especialidad por fila
+
+                        if usa_esp_fila:
+                            # Tipo A: una fila por especialidad (ej. cuerpo 590)
+                            esps = sorted(set(str(r[3]).zfill(3) for r in c_rows if r[3]))
+                            for esp in esps:
+                                cnt_esp = conn.execute(f"""
+                                    SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                                    WHERE cuerpo = ? AND codigo_especialidad = ?
+                                      AND tipo_bolsa_fuente = ?
+                                      AND CAST(orden_bolsa AS INTEGER) < ?
+                                """, (r0[4], esp, tipo_fuente, orden_b)).fetchone()[0]
+                                posiciones_esp.append({
+                                    "especialidad": esp,
+                                    "posicion": cnt_esp + 1,
+                                    "por_provincia": []
+                                })
+                        else:
+                            # Tipo B: especialidades en columna (ej. cuerpo 597)
+                            esps = _split_especialidades(r0[5] or "")
+                            for esp in esps:
+                                cnt_esp = conn.execute(f"""
+                                    SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                                    WHERE cuerpo = ?
+                                      AND tipo_bolsa_fuente = ?
+                                      AND ',' || COALESCE(especialidades,'') || ',' LIKE ?
+                                      AND CAST(orden_bolsa AS INTEGER) < ?
+                                """, (r0[4], tipo_fuente, f"%,{esp},%", orden_b)).fetchone()[0]
+                                posiciones_esp.append({
+                                    "especialidad": esp,
+                                    "posicion": cnt_esp + 1,
+                                    "por_provincia": []
+                                })
+
+                        interinos_result.append({
+                            "nombre": nombre_found,
+                            "cuerpo": cuerpo_code,
+                            "posicion_general": pos_general,
+                            "provincias_activas": [],
+                            "posiciones_por_especialidad": posiciones_esp
+                        })
+
+                    return {
+                        "fecha": fecha,
+                        "tabla_usada": tabla,
+                        "interinos": interinos_result
+                    }
+
+                else:
+                    # ── Esquema antiguo: tipo_bolsa, provincias ──
+                    rows = conn.execute(
+                        f"SELECT nombre, tipo_bolsa, orden_bolsa, codigo_especialidad, COALESCE(provincias,'') "
+                        f"FROM {tabla} WHERE nombre LIKE ?",
+                        (f"%{nombre_norm}%",)
+                    ).fetchall()
+
+                    if not rows:
+                        raise HTTPException(status_code=404, detail="Interino no encontrado en esa fecha.")
+
+                    nombre_found = rows[0][0]
+                    tipo_b  = rows[0][1]
+                    orden_b = rows[0][2]
+                    mis_provincias = _parse_provs(rows[0][4] or "")
+
+                    pos_general_cnt = conn.execute(f"""
                         SELECT COUNT(DISTINCT nombre) FROM {tabla}
-                        WHERE codigo_especialidad = ?
-                          AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
-                            OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
-                    """, (esp, tipo_b, tipo_b, orden_b)).fetchone()[0]
+                        WHERE (CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
+                           OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?)
+                    """, (tipo_b, tipo_b, orden_b)).fetchone()[0]
+                    pos_general = pos_general_cnt + 1
 
-                    por_provincia = []
-                    for prov in mis_provincias:
-                        cnt_prov = conn.execute(f"""
+                    esps = sorted(set(str(r[3]).zfill(3) for r in rows if r[3]))
+                    posiciones_esp = []
+                    for esp in esps:
+                        cnt_esp = conn.execute(f"""
                             SELECT COUNT(DISTINCT nombre) FROM {tabla}
                             WHERE codigo_especialidad = ?
-                              AND (',' || COALESCE(provincias,'') || ',' LIKE ?)
                               AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
                                 OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
-                        """, (esp, f"%,{prov},%", tipo_b, tipo_b, orden_b)).fetchone()[0]
-                        por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
+                        """, (esp, tipo_b, tipo_b, orden_b)).fetchone()[0]
 
-                    posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
+                        por_provincia = []
+                        for prov in mis_provincias:
+                            cnt_prov = conn.execute(f"""
+                                SELECT COUNT(DISTINCT nombre) FROM {tabla}
+                                WHERE codigo_especialidad = ?
+                                  AND (',' || COALESCE(provincias,'') || ',' LIKE ?)
+                                  AND ((CAST(tipo_bolsa AS INTEGER) < CAST(? AS INTEGER))
+                                    OR (CAST(tipo_bolsa AS INTEGER) = CAST(? AS INTEGER) AND CAST(orden_bolsa AS INTEGER) < ?))
+                            """, (esp, f"%,{prov},%", tipo_b, tipo_b, orden_b)).fetchone()[0]
+                            por_provincia.append({"codigo": prov, "provincia": PROV_MAP.get(prov, prov), "posicion": cnt_prov + 1})
 
-            return {
-                "fecha": fecha,
-                "tabla_usada": tabla,
-                "interinos": [{
-                    "nombre": nombre_found,
-                    "posicion_general": pos_general,
-                    "provincias_activas": mis_provincias,
-                    "posiciones_por_especialidad": posiciones_esp
-                }]
-            }
+                        posiciones_esp.append({"especialidad": esp, "posicion": cnt_esp + 1, "por_provincia": por_provincia})
+
+                    return {
+                        "fecha": fecha,
+                        "tabla_usada": tabla,
+                        "interinos": [{
+                            "nombre": nombre_found,
+                            "posicion_general": pos_general,
+                            "provincias_activas": mis_provincias,
+                            "posiciones_por_especialidad": posiciones_esp
+                        }]
+                    }
 
     except HTTPException:
         raise
