@@ -963,13 +963,25 @@ def no_disponibles_adelante(
     except ValueError:
         raise HTTPException(status_code=400, detail="Formato de fecha no válido. Usa YYYY-MM-DD.")
 
+    # Determinar la tabla de disponibles semanales según el curso escolar de la fecha.
+    # El curso empieza en agosto: sep-jul → anio_inicio / anio_inicio+1
+    anio_inicio_disp = dt.year if dt.month >= 8 else dt.year - 1
+    tabla_disp = f"disponibles_semanales_{anio_inicio_disp}_{anio_inicio_disp + 1}"
+
     tabla_adj_activa = f"adjudicaciones_{ANIO_BOLSA}_{int(ANIO_BOLSA) + 1}"
 
     with sqlite3.connect(DB_PATH) as conn:
 
-        # ── 0) Verificar que existe datos para esa semana ─────────────────
+        # ── 0) Verificar que existe la tabla y datos para esa semana ──────
+        tabla_disp_existe = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tabla_disp,)
+        ).fetchone()
+        if not tabla_disp_existe:
+            raise HTTPException(status_code=404,
+                detail=f"No hay datos de disponibles para el curso {anio_inicio_disp}-{anio_inicio_disp + 1}.")
         cnt = conn.execute(
-            f"SELECT COUNT(*) FROM {TABLA_DISPONIBLES_SEMANALES} WHERE semana=?",
+            f"SELECT COUNT(*) FROM {tabla_disp} WHERE semana=?",
             (semana_iso,)
         ).fetchone()[0]
         if cnt == 0:
@@ -1016,7 +1028,7 @@ def no_disponibles_adelante(
         # ── 2) Set de disponibles (solo mismo cuerpo, vía índice semana+cuerpo) ──
         nombres_disp = {
             normalizar_nombre(r[0]) for r in conn.execute(
-                f"SELECT nombre FROM {TABLA_DISPONIBLES_SEMANALES} WHERE semana=? AND cuerpo=?",
+                f"SELECT nombre FROM {tabla_disp} WHERE semana=? AND cuerpo=?",
                 (semana_iso, user_cuerpo)
             ).fetchall()
         }
@@ -1052,9 +1064,9 @@ def no_disponibles_adelante(
         en_disp = user_nom_norm in nombres_disp
         if en_disp:
             pos_en_disp = conn.execute(
-                f"SELECT COUNT(*) FROM {TABLA_DISPONIBLES_SEMANALES} "
+                f"SELECT COUNT(*) FROM {tabla_disp} "
                 f"WHERE semana=? AND cuerpo=? AND CAST(orden_bolsa AS INTEGER) < ("
-                f"  SELECT CAST(orden_bolsa AS INTEGER) FROM {TABLA_DISPONIBLES_SEMANALES} "
+                f"  SELECT CAST(orden_bolsa AS INTEGER) FROM {tabla_disp} "
                 f"  WHERE semana=? AND cuerpo=? AND nombre LIKE ? LIMIT 1"
                 f")",
                 (semana_iso, user_cuerpo, semana_iso, user_cuerpo, f"%{nombre_norm[-10:]}%")
