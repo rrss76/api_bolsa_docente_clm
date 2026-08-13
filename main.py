@@ -940,7 +940,8 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
 def no_disponibles_adelante(
     nombre: str = Query(...),
     fecha: str = Query(..., description="Fecha semanal 'YYYY-MM-DD'"),
-    cuerpo: str = Query(None, description="Cuerpo del aspirante (ej: '597'). Opcional pero recomendado.")
+    cuerpo: str = Query(None, description="Cuerpo del aspirante (ej: '597'). Opcional pero recomendado."),
+    especialidad_filtro: str = Query(None, description="DEBUG: filtra nombres por esta especialidad")
 ):
     """
     No disponibles por delante del aspirante en una fecha concreta.
@@ -1113,11 +1114,22 @@ def no_disponibles_adelante(
             for esp, cnt in sorted(esp_counts.items(), key=lambda x: -x[1])
         ]
 
-        return {
+        # DEBUG: devolver nombres filtrados por especialidad si se solicita
+        nombres_debug = None
+        if especialidad_filtro:
+            esp_norm = str(int(especialidad_filtro)).zfill(3) if especialidad_filtro.isdigit() else especialidad_filtro
+            nombres_debug = sorted([
+                nn for nn, esps in no_disp.items() if esp_norm in esps
+            ])
+
+        resp = {
             "fecha": fecha,
             "total_no_disponibles_por_delante": len(no_disp),
             "por_especialidad": resumen_especialidad,
         }
+        if nombres_debug is not None:
+            resp["_nombres_debug"] = nombres_debug
+        return resp
 
 # ─────────────────────────────────────────────
 # ESTIMACIÓN DE ADJUDICACIÓN
