@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import logging
+import gc
 
 app = FastAPI(title="API Interinos CLM")
 
@@ -361,12 +362,14 @@ def buscar_nombre(query: str = Query(...)):
         union = _union_bolsas_all_anios(conn)
         if not union:
             return []
+        # Filtrar en SQL para no cargar toda la tabla en memoria
         df = pd.read_sql_query(
-            f"SELECT nombre, orden_bolsa, cuerpo, dni_ofuscado FROM ({union});",
-            conn
+            f"SELECT nombre, nombre_normalizado, orden_bolsa, cuerpo, dni_ofuscado "
+            f"FROM ({union}) WHERE nombre_normalizado LIKE ?;",
+            conn,
+            params=(f"%{qnorm}%",)
         )
 
-    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     mask = df["nombre_normalizado"].str.contains(qnorm, case=False, na=False)
     df = df[mask].copy()
 
@@ -417,12 +420,16 @@ def cursos_disponibles():
 @app.get("/datos_interino")
 def datos_interino(nombre: str = Query(..., description="Nombre completo o parcial del interino"), dni: str = Query(None, description="DNI ofuscado para identificar unívocamente al interino")):
     """Datos de puntuación e idiomas de un interino en la bolsa inicial (todos los años)."""
+    nombre_busqueda = normalizar_nombre(nombre)
     with sqlite3.connect(DB_PATH) as conn:
         union = _union_bolsas_all_anios(conn)
-        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
+        # Filtrar en SQL para no cargar toda la tabla en memoria
+        df = pd.read_sql_query(
+            f"SELECT * FROM ({union}) WHERE nombre_normalizado LIKE ?",
+            conn,
+            params=(f"%{nombre_busqueda}%",)
+        )
 
-    nombre_busqueda = normalizar_nombre(nombre)
-    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
     # Primero buscar coincidencia exacta; si no hay, usar contains como fallback
     coincidencias = df[df["nombre_normalizado"] == nombre_busqueda]
     if coincidencias.empty:
@@ -491,19 +498,26 @@ def posicion_inicial(
     nombre: str = Query(..., description="Parte del nombre del interino")
 ):
     try:
+        nombre_busqueda = normalizar_nombre(nombre)
         with sqlite3.connect(DB_PATH) as conn:
             union = _union_bolsas(conn)
-            df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
+            df = pd.read_sql_query(
+                f"SELECT * FROM ({union}) WHERE nombre_normalizado LIKE ?",
+                conn,
+                params=(f"%{nombre_busqueda}%",)
+            )
 
-        df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
-        nombre_busqueda = normalizar_nombre(nombre)
-
-        df_nombre = df[df["nombre_normalizado"].str.contains(nombre_busqueda, na=False)]
-
-        if df_nombre.empty:
+        if df.empty:
             return {"mensaje": "No se encontraron interinos con ese nombre."}
 
-        df_bolsa_ordenada = df.sort_values(by="orden_bolsa").reset_index(drop=True)
+        # Para calcular posición general necesitamos el orden de todos
+        with sqlite3.connect(DB_PATH) as conn:
+            union = _union_bolsas(conn)
+            df_all = pd.read_sql_query(
+                f"SELECT nombre_normalizado, orden_bolsa, especialidades FROM ({union})",
+                conn
+            )
+        df_bolsa_ordenada = df_all.sort_values(by="orden_bolsa").reset_index(drop=True)
 
         resultados = []
 
@@ -521,8 +535,8 @@ def posicion_inicial(
             posiciones_especialidad = []
 
             for esp in especialidades:
-                df_esp = df[
-                    df["especialidades"].fillna("").str.split(",").apply(lambda x: esp in x)
+                df_esp = df_all[
+                    df_all["especialidades"].fillna("").str.split(",").apply(lambda x: esp in x)
                 ].sort_values(by="orden_bolsa").reset_index(drop=True)
 
                 pos_esp = df_esp[df_esp["nombre_normalizado"] == nombre_normalizado].index
@@ -533,9 +547,8 @@ def posicion_inicial(
                     idiomas = ["aleman", "frances", "ingles", "italiano", "leng_signos"]
                     personas_con_idiomas = {}
                     for idioma in idiomas:
-                        col = idioma
-                        if col in personas_antes.columns:
-                            personas_con_idiomas[idioma] = int(personas_antes[personas_antes[col] == "S"].shape[0])
+                        if idioma in personas_antes.columns:
+                            personas_con_idiomas[idioma] = int(personas_antes[personas_antes[idioma] == "S"].shape[0])
                         else:
                             personas_con_idiomas[idioma] = 0
 
@@ -553,6 +566,7 @@ def posicion_inicial(
                 "posiciones_por_especialidad": posiciones_especialidad
             })
 
+        del df, df_all, df_bolsa_ordenada; gc.collect()
         return {"resultados": resultados}
 
     except Exception as e:
@@ -570,15 +584,16 @@ def posicion_disponibles(nombre: str = Query(..., description="Nombre del interi
 
     with sqlite3.connect(DB_PATH) as conn:
         union = _union_bolsas(conn)
-        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
+        df = pd.read_sql_query(
+            f"SELECT orden_bolsa, nombre, nombre_normalizado, especialidades, provincias FROM ({union})",
+            conn
+        )
 
-    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
-    df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
     df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
-
     df_filtrado = df[df["nombre_normalizado"].str.contains(nombre, case=False, na=False)].copy()
 
     if df_filtrado.empty:
+        del df; gc.collect()
         return {"mensaje": "No se encontraron interinos con ese nombre."}
 
     resultados = []
@@ -625,15 +640,16 @@ def posicion_disponibles_especialidad(
 
     with sqlite3.connect(DB_PATH) as conn:
         union = _union_bolsas(conn)
-        df = pd.read_sql_query(f"SELECT * FROM ({union})", conn)
+        df = pd.read_sql_query(
+            f"SELECT orden_bolsa, nombre, nombre_normalizado, especialidades, provincias FROM ({union})",
+            conn
+        )
 
-    df["nombre_normalizado"] = df["nombre"].apply(normalizar_nombre)
-    df = df[["orden_bolsa", "nombre", "nombre_normalizado", "especialidades", "provincias"]].copy()
     df = df.sort_values(by="orden_bolsa").reset_index(drop=True)
-
     df_filtrado = df[df["nombre_normalizado"].str.contains(nombre, case=False, na=False)].copy()
 
     if df_filtrado.empty:
+        del df; gc.collect()
         return {"mensaje": "No se encontraron interinos con ese nombre."}
 
     resultados = []
