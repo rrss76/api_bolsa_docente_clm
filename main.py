@@ -386,7 +386,7 @@ def buscar_nombre(query: str = Query(...)):
         return f"{base} (Cuerpo {cuerpo})" if cuerpo else base
 
     df["display"] = df.apply(mk_display, axis=1)
-    return df[["nombre", "orden_bolsa", "cuerpo", "dni_ofuscado", "display"]].to_dict(orient="records")
+    return df[["nombre", "nombre_normalizado", "orden_bolsa", "cuerpo", "dni_ofuscado", "display"]].to_dict(orient="records")
 
 
 @app.get("/fechas_disponibles")
