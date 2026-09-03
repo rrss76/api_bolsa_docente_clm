@@ -7,8 +7,10 @@ Se lanza como proceso separado desde main.py para evitar el timeout
 de Render cuando el proceso es largo.
 
 Uso:
-    python run_pipeline.py            # ejecución normal
-    python run_pipeline.py --force    # fuerza re-descarga de PDFs ya procesados
+    python run_pipeline.py                                  # ejecución normal
+    python run_pipeline.py --force                          # fuerza re-descarga de PDFs ya procesados
+    python run_pipeline.py --db Base_Bolsa_Docente_TEST.db   # prueba contra una BD alternativa
+                                                              # (no envía notificación push)
 """
 
 import sys
@@ -59,7 +61,7 @@ CAMPOS_ADJ = [
 ]
 
 
-def main(force: bool = False):
+def main(force: bool = False, db_path: str | None = None):
     log.info("=" * 50)
     log.info(f"Pipeline CLM — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     log.info("=" * 50)
@@ -152,14 +154,18 @@ def main(force: bool = False):
         writer.writerows(registros_adj)
         path_adj = f_adj.name
 
+    destino_db = Path(db_path) if db_path else Path(DB_BOLSA_PATH)
     try:
-        log.info("▶ Cargando en base de datos...")
-        cargador.procesar(Path(path_disp), Path(path_adj), Path(DB_BOLSA_PATH))
+        log.info(f"▶ Cargando en base de datos... ({destino_db})")
+        cargador.procesar(Path(path_disp), Path(path_adj), destino_db)
         log.info("✅ Pipeline completado correctamente.")
-        notificar_actualizacion(
-            "Bolsa Docente CLM actualizada",
-            "Se han publicado nuevos datos de disponibles o adjudicaciones.",
-        )
+        if db_path:
+            log.info("→ Base de datos de prueba: notificación push omitida.")
+        else:
+            notificar_actualizacion(
+                "Bolsa Docente CLM actualizada",
+                "Se han publicado nuevos datos de disponibles o adjudicaciones.",
+            )
         return 0
     except Exception as e:
         log.error(f"✗ Error en cargador: {e}")
@@ -173,5 +179,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--force", action="store_true",
                         help="Forzar re-descarga aunque ya estén procesados")
+    parser.add_argument("--db", default=None,
+                        help="Ruta a una base de datos alternativa (p.ej. de pruebas). "
+                             "Si se indica, no se envía la notificación push.")
     args = parser.parse_args()
-    sys.exit(main(force=args.force))
+    sys.exit(main(force=args.force, db_path=args.db))

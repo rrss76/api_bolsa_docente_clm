@@ -1,3 +1,7 @@
+# Bases de datos de prueba locales (nunca deben ir al repo)
+*_TEST.db
+*_test.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
