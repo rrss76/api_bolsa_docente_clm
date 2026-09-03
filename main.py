@@ -1808,17 +1808,22 @@ def run_scraper(
         cmd = [sys.executable, "run_pipeline.py"]
         if force:
             cmd.append("--force")
-        subprocess.Popen(
+        proceso = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        # El lock se liberará cuando el proceso termine
-        # (no podemos hacer join sin bloquear, así que lo liberamos tras lanzar)
-        _scraper_lock.release()
     except Exception as e:
         _scraper_lock.release()
         raise HTTPException(status_code=500, detail=f"Error lanzando pipeline: {e}")
+
+    def _esperar_y_liberar(p: subprocess.Popen):
+        p.wait()
+        _scraper_lock.release()
+
+    # Libera el lock en un hilo aparte cuando el proceso termine de verdad,
+    # sin bloquear la respuesta HTTP.
+    threading.Thread(target=_esperar_y_liberar, args=(proceso,), daemon=True).start()
 
     return {"status": "iniciado", "mensaje": "Pipeline lanzado como proceso independiente."}
 
