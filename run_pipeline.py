@@ -41,6 +41,7 @@ from scraper import (
     guardar_estado,
     descargar_pdf_bytes,
 )
+from push_notifications import notificar_actualizacion
 
 import os
 DB_BOLSA_PATH = os.getenv("DB_BOLSA_PATH", "Base_Bolsa_Docente.db")
@@ -155,6 +156,10 @@ def main(force: bool = False):
         log.info("▶ Cargando en base de datos...")
         cargador.procesar(Path(path_disp), Path(path_adj), Path(DB_BOLSA_PATH))
         log.info("✅ Pipeline completado correctamente.")
+        notificar_actualizacion(
+            "Bolsa Docente CLM actualizada",
+            "Se han publicado nuevos datos de disponibles o adjudicaciones.",
+        )
         return 0
     except Exception as e:
         log.error(f"✗ Error en cargador: {e}")
