@@ -36,7 +36,7 @@ from datetime import datetime
 # CONFIGURACIÓN
 # =========================================================
 DB_NAME   = "Base_Bolsa_Docente.db"
-ANIO      = 2025
+ANIO      = 2026
 TABLA_ADJ  = f"adjudicaciones_{ANIO}_{ANIO + 1}"
 TABLA_DISP = f"disponibles_semanales_{ANIO}_{ANIO + 1}"
 
@@ -70,20 +70,20 @@ def semana_iso(fecha_str):
         return None
 
 
-def normalizar_cod_especialidad(cod, cod_cuerpo):
+def formatear_cod_especialidad(cod, cod_cuerpo=None):
     """
-    En adjudicaciones el cod_especialidad viene como '590001' (con prefijo de cuerpo).
-    En disponibles viene como '1' (solo número).
-    Devuelve siempre el número sin prefijo, como entero.
+    Devuelve el código de especialidad siempre con 3 dígitos (ej: 1 → '001', 36 → '036').
+    Si el código lleva el prefijo del cuerpo (ej: 590001), lo elimina primero.
     """
     try:
-        cod_str = str(int(cod))
-        cuerpo_str = str(int(cod_cuerpo))
-        if cod_str.startswith(cuerpo_str):
-            cod_str = cod_str[len(cuerpo_str):]
-        return int(cod_str)
+        cod_str = str(int(float(str(cod))))
+        if cod_cuerpo is not None:
+            cuerpo_str = str(int(cod_cuerpo))
+            if cod_str.startswith(cuerpo_str):
+                cod_str = cod_str[len(cuerpo_str):]
+        return cod_str.zfill(3)
     except Exception:
-        return None
+        return str(cod)
 
 
 # =========================================================
@@ -137,7 +137,7 @@ def volcar_disponibles(conn, df_disp, fecha_raw, semana, fuente):
     for _, row in df_disp.iterrows():
         filas.append({
             'cuerpo':               CUERPO_MAP.get(int(row['cod_cuerpo']), str(row['cod_cuerpo'])),
-            'codigo_especialidad':  str(row['cod_especialidad']),
+            'codigo_especialidad':  formatear_cod_especialidad(row['cod_especialidad'], row['cod_cuerpo']),
             'especialidad':         row['especialidad'],
             'dni_ofuscado':         row['dni'],
             'nombre':               row['apellidos_nombre'],
@@ -168,7 +168,7 @@ def volcar_adjudicaciones(conn, df_adj, semana, fuente):
 
         filas.append({
             'cuerpo':               CUERPO_MAP.get(cod_cuerpo, str(cod_cuerpo)),
-            'codigo_especialidad':  str(normalizar_cod_especialidad(row['cod_especialidad'], cod_cuerpo)),
+            'codigo_especialidad':  formatear_cod_especialidad(row['cod_especialidad'], cod_cuerpo),
             'especialidad':         row['especialidad'],
             'dni_ofuscado':         row['dni'],
             'nombre':               row['apellidos_nombre'],
@@ -325,8 +325,9 @@ def procesar(disp_path, adj_path, db_path):
     print(f"  Base de datos:  {db_path.name}")
     print(f"{'='*60}\n")
 
-    df_disp = pd.read_csv(disp_path)
-    df_adj  = pd.read_csv(adj_path)
+    # dtype str en cod_especialidad para preservar los ceros a la izquierda (ej: '001')
+    df_disp = pd.read_csv(disp_path,  dtype={'cod_especialidad': str, 'cod_cuerpo': str})
+    df_adj  = pd.read_csv(adj_path,   dtype={'cod_especialidad': str, 'cod_cuerpo': str})
 
     fecha_raw = df_disp['fecha'].iloc[0]
     fecha_fmt = datetime.strptime(fecha_raw.strip(), '%d/%m/%Y').strftime('%Y%m%d')

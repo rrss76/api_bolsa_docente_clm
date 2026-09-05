@@ -52,7 +52,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 COL_COD_CENTRO  = (25,  140)
-COL_LOCALIDAD   = (140, 285)
+COL_LOCALIDAD   = (115, 285)
 COL_DNI_NOMBRE  = (250, 515)
 COL_TITULAR     = (510, 590)
 COL_BOLSA_POS   = (590, 680)
@@ -75,9 +75,9 @@ RE_PERIODO = re.compile(r"CON COMIENZO ENTRE\s+(\d{2}/\d{2}/\d{4})\s+[Yy]\s+(\d{
 RE_COD_CENTRO = re.compile(r"^\d{8}$")
 RE_DNI = re.compile(r"^\*{3,5}\d+\*{1,3}$")
 RE_DNI_NOMBRE = re.compile(r"^(\*{3,5}\d+\*{1,3})-(.+)$")
-RE_BOLSA_POS = re.compile(r"^(\d+)-(.+)$")
+RE_BOLSA_POS = re.compile(r"^([\dA-Z]+)-([\dA-Z/]+)$")
 RE_FECHA = re.compile(r"^\d{2}/\d{2}/\d{4}$")
-RE_ORDINARIO = re.compile(r"^(Ordinario|Urgente)", re.IGNORECASE)
+RE_ORDINARIO = re.compile(r"^(Ordinario|Urgente|Itinerante)", re.IGNORECASE)
 
 CABECERA_TOKENS = {
     "Página", "RELACIÓN", "ASPIRANTES", "ADJUDICADOS", "CON", "COMIENZO",
@@ -124,9 +124,18 @@ def is_cabecera(fila: list) -> bool:
 
 
 def is_linea1(fila: list) -> bool:
-    """Línea 1: tiene cod_centro (8 dígitos) en columna izquierda."""
-    cod = words_in_col(fila, COL_COD_CENTRO)
-    return bool(RE_COD_CENTRO.match(cod))
+    """Línea 1: tiene cod_centro (8 dígitos) como primera palabra en columna izquierda.
+
+    BUGFIX: La función anterior usaba words_in_col(COL_COD_CENTRO) que devolvía
+    todas las palabras en x0 ∈ (25,140), incluyendo la primera palabra de la localidad
+    cuando ésta tiene varias palabras (ej. "19003875 YUNQUERA"), rompiendo el match.
+    Ahora buscamos únicamente la primera palabra del renglón con x0 < 140.
+    """
+    words_left = [w for w in fila if w["x0"] < 140]
+    if not words_left:
+        return False
+    first_word = min(words_left, key=lambda w: w["x0"])["text"]
+    return bool(RE_COD_CENTRO.match(first_word))
 
 
 def is_linea2(fila: list) -> bool:
@@ -223,18 +232,20 @@ def parse_page(page, estado: dict) -> list[dict]:
             i += 1
             continue
 
-        if is_cabecera(fila):
-            i += 1
-            continue
+        # BUGFIX: is_linea2 se comprueba ANTES que is_cabecera.
+        # Centros como "IES CASTILLA", "CEIP ENTRE CULTURAS", "CEIP CASTILLA-LA MANCHA"
+        # contienen tokens en CABECERA_TOKENS ("CASTILLA", "ENTRE", "MANCHA"), lo que
+        # hacía que is_cabecera() los descartara. Una fila con "Ordinario/Urgente" en la
+        # columna de jornada nunca puede ser una cabecera.
 
-        # Cada adjudicación tiene DOS filas que pueden aparecer en cualquier orden:
+        # Cada adjudicación tiene DOS filas:
         #   - Fila "datos": cod_centro + localidad + DNI/nombre + bolsa  (is_linea1)
         #   - Fila "centro": nombre_centro + jornada + fechas            (is_linea2)
-        # La estrategia: al encontrar cualquiera de las dos, guardar en estado["pendiente"]
-        # el tipo correspondiente. Al encontrar la otra, combinarlas y emitir el registro.
 
         if is_linea1(fila):
-            cod_centro = words_in_col(fila, COL_COD_CENTRO)
+            # BUGFIX: extrae cod_centro como la primera palabra con x0<140 (no toda la columna)
+            words_left = [w for w in fila if w["x0"] < 140]
+            cod_centro = min(words_left, key=lambda w: w["x0"])["text"] if words_left else ""
             localidad  = words_in_col(fila, COL_LOCALIDAD)
             dni_nombre = words_in_col(fila, COL_DNI_NOMBRE)
             titular    = words_in_col(fila, COL_TITULAR)
@@ -297,6 +308,10 @@ def parse_page(page, estado: dict) -> list[dict]:
             else:
                 # Guardar fila "centro" y esperar la fila "datos"
                 estado["pendiente_centro"] = centro
+            i += 1
+            continue
+
+        if is_cabecera(fila):
             i += 1
             continue
 
