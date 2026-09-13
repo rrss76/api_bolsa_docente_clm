@@ -7,19 +7,21 @@ name: Pipeline Automatico CLM (prueba)
 # rama `automation-test` — NUNCA a `main`, así que nunca toca producción
 # ni dispara un redeploy en Render.
 #
-# Está en workflow_dispatch (disparo manual) a propósito, para vigilar de
-# cerca las primeras ejecuciones antes de dejarlo desatendido.
+# Tras 2 semanas de disparos manuales limpios (05/09 y 11/09, contenido
+# identico byte a byte contra la carga manual), desde el 2026-09-13 el
+# `schedule:` esta activo para probar tambien el disparo automatico --
+# pero sigue apuntando solo a `automation-test`, asi que produccion no
+# corre ningun riesgo.
 #
-# Cuando se confirme que el pipeline es fiable (tras el periodo de prueba):
+# Cuando se confirme que el pipeline es fiable de forma desatendida:
 #   1. Cambiar `ref: automation-test` por `ref: main` en el paso de checkout
 #      y en el paso de push, para que comitee a producción de verdad.
-#   2. Descomentar el bloque `schedule:` de abajo.
-#   3. Quitar "(prueba)" del nombre del workflow si se quiere.
+#   2. Quitar "(prueba)" del nombre del workflow si se quiere.
 # ─────────────────────────────────────────────────────────────────────────
 
 on:
-  # schedule:
-  #   - cron: "0,30 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
+  schedule:
+    - cron: "0,30 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
   workflow_dispatch:
     inputs:
       force:
