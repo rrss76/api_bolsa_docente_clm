@@ -36,6 +36,13 @@ on:
 permissions:
   contents: write
 
+# Evita que dos ejecuciones se solapen y choquen al hacer push a la vez
+# a automation-test -- si una ya esta en marcha, la siguiente espera en
+# cola en vez de arrancar en paralelo.
+concurrency:
+  group: pipeline-automatico-automation-test
+  cancel-in-progress: false
+
 jobs:
   pipeline:
     runs-on: ubuntu-latest
