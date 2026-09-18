@@ -21,8 +21,10 @@ name: Pipeline Automatico CLM (prueba)
 
 on:
   schedule:
-    - cron: "7,37 10-14 * * 3-5"   # Mié-Vie, cada 30 min, 12:00-16:00h española (UTC+2 verano)
-                                    # Minutos :07/:37 (no :00/:30) para evitar la hora punta de GitHub Actions
+    - cron: "7 10-14 * * 4"             # Jueves, 1 vez/hora, 12:07-16:07h española (UTC+2 verano)
+    - cron: "3,18,33,48 10-14 * * 5"    # Viernes, cada 15 min, 12:03-16:48h española (UTC+2 verano)
+                                          # Minutos desplazados (no :00/:15/:30/:45 exactos) para evitar
+                                          # la hora punta de GitHub Actions, ver nota mas abajo
   workflow_dispatch:
     inputs:
       force:
