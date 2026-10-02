@@ -61,6 +61,17 @@ jobs:
       - name: Configurar Git LFS
         run: git lfs install
 
+      # La rama automation-test solo debe aportar la BD y el estado; el codigo
+      # se toma siempre de main para no ejecutar copias antiguas (--worktree:
+      # no se anade al indice, asi que no acaba en el commit de la BD).
+      - name: Usar el codigo mas reciente de main
+        run: |
+          git fetch origin main
+          git restore --source=origin/main --worktree -- \
+            scraper.py run_pipeline.py push_notifications.py \
+            2_Parser_Disponibles_auto.py 3_Parser_Adjudicaciones_auto.py \
+            4_Cargador_Semanal.py requirements.txt
+
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
