@@ -82,7 +82,7 @@ def obtener_adjudicaciones_portada() -> list[dict]:
 
     adjudicaciones = []
     patron = re.compile(
-        r"adjudicaci[oó]n.{0,10}d[ií]a.{0,5}(\d{2}/\d{2}/\d{4})",
+        r"adjudicaci[oó]n.{0,10}d[ií]a.{0,5}(\d{1,2}/\d{1,2}/\d{4})",
         re.IGNORECASE
     )
 
@@ -92,7 +92,7 @@ def obtener_adjudicaciones_portada() -> list[dict]:
             href = a["href"]
             url  = href if href.startswith("http") else BASE_URL + href
             m    = patron.search(texto)
-            fecha = m.group(1) if m else ""
+            fecha = "/".join(p.zfill(2) for p in m.group(1).split("/")) if m else ""
             adjudicaciones.append({
                 "titulo": texto,
                 "url":    url,
