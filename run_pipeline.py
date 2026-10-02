@@ -69,6 +69,13 @@ def main(force: bool = False, db_path: str | None = None):
     estado = cargar_estado()
     adjudicaciones = obtener_adjudicaciones_portada()
 
+    from zoneinfo import ZoneInfo
+    ahora = datetime.now(ZoneInfo("Europe/Madrid"))
+    if (ahora.weekday() == 4 and ahora.hour >= 13
+            and not any(a["fecha"] == ahora.strftime("%d/%m/%Y") for a in adjudicaciones)):
+        log.error("✗ Viernes pasadas las 13:00 y no hay ninguna adjudicación con la fecha de hoy en portada.")
+        return 3
+
     registros_disp = []
     registros_adj  = []
     hay_novedades  = False

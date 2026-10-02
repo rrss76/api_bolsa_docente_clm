@@ -107,6 +107,22 @@ def obtener_adjudicaciones_portada() -> list[dict]:
             vistas.add(adj["url"])
             resultado.append(adj)
 
+    # Enlaces que parecen una adjudicacion pero cuya fecha no se reconoce:
+    # la Junta ha cambiado el formato del titulo. Fallar en rojo en vez de
+    # dar "sin novedades" en verde.
+    patron_flojo = re.compile(r"adjudicaci[oó]n.{0,10}d[ií]a", re.IGNORECASE)
+    urls_flojas = {
+        (a["href"] if a["href"].startswith("http") else BASE_URL + a["href"])
+        for a in soup.find_all("a", href=True)
+        if patron_flojo.search(a.get_text(strip=True))
+    }
+    sin_reconocer = urls_flojas - vistas
+    if sin_reconocer:
+        raise RuntimeError(
+            "Formato de fecha no reconocido en enlaces de adjudicacion de la portada: "
+            + ", ".join(sorted(sin_reconocer))
+        )
+
     print(f"  → {len(resultado)} adjudicación(es) encontrada(s) en portada")
     return resultado
 
