@@ -47,6 +47,7 @@ from push_notifications import notificar_actualizacion
 
 import os
 DB_BOLSA_PATH = os.getenv("DB_BOLSA_PATH", "Base_Bolsa_Docente.db")
+CUERPOS_ESPERADOS = {f"0{n}" for n in range(590, 599)}
 
 CAMPOS_DISP = [
     "fecha", "cod_cuerpo", "cuerpo", "cod_especialidad", "especialidad",
@@ -80,6 +81,7 @@ def main(force: bool = False, db_path: str | None = None):
     registros_adj  = []
     hay_novedades  = False
     fecha_raw      = ""
+    problemas      = []
 
     for adj in adjudicaciones:
         pdfs_por_seccion = extraer_pdfs_pagina(adj["url"])
@@ -92,6 +94,7 @@ def main(force: bool = False, db_path: str | None = None):
 
                 resultado = descargar_pdf_bytes(pdf["url"])
                 if not resultado:
+                    problemas.append(f"no se pudo descargar {pdf['url']}")
                     continue
 
                 pdf_bytes, nombre = resultado
@@ -109,6 +112,7 @@ def main(force: bool = False, db_path: str | None = None):
                 log.info(f"  ✓ {nombre}")
 
                 try:
+                    nuevos = []
                     if seccion == "disponibles":
                         nuevos = parser_disp.parse_pdf_bytes(pdf_bytes, nombre)
                         registros_disp.extend(nuevos)
@@ -117,20 +121,35 @@ def main(force: bool = False, db_path: str | None = None):
                         nuevos = parser_adj.parse_pdf_bytes(pdf_bytes, nombre)
                         registros_adj.extend(nuevos)
                         log.info(f"    → {len(nuevos)} registros extraídos")
+                    if not nuevos:
+                        problemas.append(f"{nombre} no contiene registros")
                 except Exception as e:
                     log.error(f"  ✗ Error parseando {nombre}: {e}")
+                    problemas.append(f"error parseando {nombre}: {e}")
                 finally:
                     # Liberar memoria del PDF inmediatamente tras parsear
                     del pdf_bytes
                     import gc; gc.collect()
-
-    guardar_estado(estado)
 
     if not hay_novedades:
         log.info("✓ Sin novedades esta ejecución.")
         return 0
 
     log.info(f"  → {len(registros_disp)} disponibles | {len(registros_adj)} adjudicaciones")
+
+    # Validación antes de tocar la BD. Si algo falta no se marca ningún PDF como
+    # procesado, así que el siguiente disparo reintenta el conjunto completo.
+    cuerpos_disp = {str(r.get("cod_cuerpo", "")).strip().zfill(4) for r in registros_disp}
+    faltan = sorted(CUERPOS_ESPERADOS - cuerpos_disp)
+    if faltan:
+        problemas.append(f"faltan disponibles de las bolsas {', '.join(faltan)}")
+    if not registros_adj:
+        problemas.append("no hay ninguna adjudicación")
+    if problemas:
+        log.error("✗ Datos incompletos o con errores; no se carga nada (se reintentará en el siguiente disparo):")
+        for p in problemas:
+            log.error(f"    - {p}")
+        return 4
 
     if not fecha_raw:
         log.error("✗ No se pudo determinar la fecha.")
@@ -165,6 +184,7 @@ def main(force: bool = False, db_path: str | None = None):
     try:
         log.info(f"▶ Cargando en base de datos... ({destino_db})")
         cargador.procesar(Path(path_disp), Path(path_adj), destino_db)
+        guardar_estado(estado)
         log.info("✅ Pipeline completado correctamente.")
         if db_path:
             log.info("→ Base de datos de prueba: notificación push omitida.")
