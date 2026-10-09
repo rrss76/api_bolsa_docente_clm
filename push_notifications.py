@@ -40,14 +40,15 @@ def _get_app():
     return _firebase_app
 
 
-def notificar_actualizacion(titulo: str, cuerpo: str) -> None:
+def notificar_actualizacion(titulo: str, cuerpo: str) -> bool:
     """Envía un push al topic 'actualizaciones'. Nunca lanza excepción:
-    un fallo de notificación no debe tumbar el pipeline de datos."""
+    un fallo de notificación no debe tumbar el pipeline de datos.
+    Devuelve True solo si el mensaje se envió."""
     try:
         app = _get_app()
         if app is None:
             log.warning("FIREBASE_SERVICE_ACCOUNT_JSON no configurado; push omitido.")
-            return
+            return False
 
         from firebase_admin import messaging
 
@@ -57,5 +58,7 @@ def notificar_actualizacion(titulo: str, cuerpo: str) -> None:
         )
         messaging.send(mensaje)
         log.info("✓ Notificación push enviada.")
+        return True
     except Exception as e:
         log.error(f"✗ Error enviando notificación push: {e}")
+        return False

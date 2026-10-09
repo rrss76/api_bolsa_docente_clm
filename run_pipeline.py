@@ -44,6 +44,7 @@ from scraper import (
     descargar_pdf_bytes,
 )
 from push_notifications import notificar_actualizacion
+from notificar import TITULO, CUERPO
 
 import os
 DB_BOLSA_PATH = os.getenv("DB_BOLSA_PATH", "Base_Bolsa_Docente.db")
@@ -62,7 +63,7 @@ CAMPOS_ADJ = [
 ]
 
 
-def main(force: bool = False, db_path: str | None = None):
+def main(force: bool = False, db_path: str | None = None, sin_notificar: bool = False):
     log.info("=" * 50)
     log.info(f"Pipeline CLM — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     log.info("=" * 50)
@@ -186,13 +187,10 @@ def main(force: bool = False, db_path: str | None = None):
         cargador.procesar(Path(path_disp), Path(path_adj), destino_db)
         guardar_estado(estado)
         log.info("✅ Pipeline completado correctamente.")
-        if db_path:
-            log.info("→ Base de datos de prueba: notificación push omitida.")
+        if db_path or sin_notificar:
+            log.info("→ Notificación push omitida (BD alternativa o --sin-notificar).")
         else:
-            notificar_actualizacion(
-                "Bolsa Docente CLM actualizada",
-                "Se han publicado nuevos datos de disponibles o adjudicaciones.",
-            )
+            notificar_actualizacion(TITULO, CUERPO)
         return 0
     except Exception as e:
         log.error(f"✗ Error en cargador: {e}")
@@ -209,5 +207,8 @@ if __name__ == "__main__":
     parser.add_argument("--db", default=None,
                         help="Ruta a una base de datos alternativa (p.ej. de pruebas). "
                              "Si se indica, no se envía la notificación push.")
+    parser.add_argument("--sin-notificar", action="store_true",
+                        help="No enviar la notificación push (la envía después notificar.py, "
+                             "una vez la API sirve los datos nuevos).")
     args = parser.parse_args()
-    sys.exit(main(force=args.force, db_path=args.db))
+    sys.exit(main(force=args.force, db_path=args.db, sin_notificar=args.sin_notificar))

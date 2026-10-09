@@ -1,30 +1,34 @@
 name: Pipeline Automatico CLM (prueba)
 
 # ─────────────────────────────────────────────────────────────────────────
-# MODO PRUEBA (activo desde 2026-09-04): este workflow ejecuta el pipeline
-# completo (scraper + parsers + carga) dentro del propio runner de GitHub
-# Actions y, si hay novedades, comitea la base de datos actualizada a la
-# rama `automation-test` — NUNCA a `main`, así que nunca toca producción
-# ni dispara un redeploy en Render.
+# Este workflow ejecuta el pipeline completo (scraper + parsers + carga)
+# dentro del runner de GitHub Actions y, si hay datos nuevos, comitea la BD
+# actualizada a la rama TARGET_BRANCH (ver `env` justo debajo).
 #
-# Tras 2 semanas de disparos manuales limpios (05/09 y 11/09, contenido
-# identico byte a byte contra la carga manual), desde el 2026-09-13 el
-# `schedule:` esta activo para probar tambien el disparo automatico --
-# pero sigue apuntando solo a `automation-test`, asi que produccion no
-# corre ningun riesgo.
+# MODO PRUEBA (estado actual): TARGET_BRANCH=automation-test y
+# NOTIFICAR="false". Comitea a una rama que Render NUNCA despliega y no envía
+# ninguna notificación, así que producción no corre ningún riesgo.
 #
-# Cuando se confirme que el pipeline es fiable de forma desatendida:
-#   1. Cambiar `ref: automation-test` por `ref: main` en el paso de checkout
-#      y en el paso de push, para que comitee a producción de verdad.
-#   2. Quitar "(prueba)" del nombre del workflow si se quiere.
+# El disparo lo hace cron-job.org (jueves cada hora, viernes cada 15 min)
+# llamando a la API de workflow_dispatch; el `schedule:` de GitHub queda como
+# respaldo (GitHub lo retrasa o se lo salta con frecuencia).
+#
+# PARA PASAR A PRODUCCIÓN (todos los pasos son necesarios):
+#   1. Copiar `estado_scraper.json` de automation-test a main (comiteado).
+#      Sin él, el primer disparo tomaría por nuevos los PDFs que ya cargaste
+#      a mano y los volvería a añadir a las tablas acumulativas.
+#   2. Crear el secreto FIREBASE_SERVICE_ACCOUNT_JSON en
+#      Settings > Secrets and variables > Actions (el mismo JSON que en Render).
+#   3. Cambiar abajo TARGET_BRANCH a "main" y NOTIFICAR a "true".
+#   4. Acordar que las cargas manuales pasan a ser solo de respaldo, y hacer
+#      `git pull` antes de cualquiera: cargar a mano encima de una BD ya
+#      cargada por el pipeline duplica filas en las tablas acumulativas.
 # ─────────────────────────────────────────────────────────────────────────
 
 on:
   schedule:
     - cron: "7 10-14 * * 4"             # Jueves, 1 vez/hora, 12:07-16:07h española (UTC+2 verano)
     - cron: "3,18,33,48 10-14 * * 5"    # Viernes, cada 15 min, 12:03-16:48h española (UTC+2 verano)
-                                          # Minutos desplazados (no :00/:15/:30/:45 exactos) para evitar
-                                          # la hora punta de GitHub Actions, ver nota mas abajo
   workflow_dispatch:
     inputs:
       force:
@@ -36,20 +40,24 @@ on:
           - "false"
           - "true"
 
+env:
+  TARGET_BRANCH: automation-test
+  NOTIFICAR: "false"
+
 permissions:
   contents: write
 
 # Evita que dos ejecuciones se solapen y choquen al hacer push a la vez
-# a automation-test -- si una ya esta en marcha, la siguiente espera en
-# cola en vez de arrancar en paralelo.
+# -- si una ya esta en marcha, la siguiente espera en cola.
 concurrency:
-  group: pipeline-automatico-automation-test
+  group: pipeline-automatico
   cancel-in-progress: false
 
 jobs:
   pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Margen para la espera a que Render despliegue antes de notificar.
+    timeout-minutes: 35
     env:
       # La BD (~160 MB) NO se descarga en el checkout: solo se baja de LFS
       # cuando hay datos nuevos que cargar (ver asegurar_bd_descargada en
@@ -58,23 +66,24 @@ jobs:
       GIT_LFS_SKIP_SMUDGE: "1"
 
     steps:
-      - name: Checkout rama de prueba (automation-test)
+      - name: Checkout de ${{ env.TARGET_BRANCH }}
         uses: actions/checkout@v4
         with:
-          ref: automation-test
+          ref: ${{ env.TARGET_BRANCH }}
           lfs: false
 
       - name: Configurar Git LFS
         run: git lfs install
 
-      # La rama automation-test solo debe aportar la BD y el estado; el codigo
-      # se toma siempre de main para no ejecutar copias antiguas (--worktree:
-      # no se anade al indice, asi que no acaba en el commit de la BD).
+      # La rama de destino solo debe aportar la BD y el estado; el codigo se
+      # toma siempre de main para no ejecutar copias antiguas (--worktree: no
+      # se anade al indice, asi que no acaba en el commit de la BD). Si el
+      # destino es main, no hace nada.
       - name: Usar el codigo mas reciente de main
         run: |
           git fetch origin main
           git restore --source=origin/main --worktree -- \
-            scraper.py run_pipeline.py push_notifications.py \
+            scraper.py run_pipeline.py push_notifications.py notificar.py \
             2_Parser_Disponibles_auto.py 3_Parser_Adjudicaciones_auto.py \
             4_Cargador_Semanal.py requirements.txt
 
@@ -91,20 +100,33 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Ejecutar pipeline (BD de prueba, sin notificacion push)
+      # La notificacion NO la envia run_pipeline: se manda despues, cuando la
+      # API ya sirve los datos nuevos (paso de notificacion, mas abajo).
+      - name: Ejecutar pipeline
         run: |
-          ARGS="--db Base_Bolsa_Docente.db"
+          ARGS="--sin-notificar"
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             ARGS="$ARGS --force"
           fi
           python run_pipeline.py $ARGS
 
       - name: Comitear BD actualizada (si hay cambios)
+        id: commit
         run: |
-          git add -f Base_Bolsa_Docente.db estado_scraper.json
+          git add -f Base_Bolsa_Docente.db
+          if [ -f estado_scraper.json ]; then git add -f estado_scraper.json; fi
           if git diff --cached --quiet; then
             echo "Sin cambios que comitear."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "test: actualizacion automatica pipeline $(date -u +'%Y-%m-%d %H:%M UTC')"
-            git push origin HEAD:automation-test
+            git commit -m "auto: actualizacion de datos $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push origin HEAD:${{ env.TARGET_BRANCH }}
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # Solo en produccion: espera a que Render sirva la fecha nueva y avisa.
+      - name: Notificar a la app cuando la API ya sirve los datos
+        if: ${{ env.NOTIFICAR == 'true' && steps.commit.outputs.pushed == 'true' }}
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        run: python notificar.py
