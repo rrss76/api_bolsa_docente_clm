@@ -25,6 +25,7 @@ Uso:
 """
 
 import sqlite3
+import subprocess
 import unicodedata
 import re
 import pandas as pd
@@ -318,7 +319,19 @@ def mostrar_y_exportar_warnings(df_adj, df_disp, exactos, prefijos,
 # =========================================================
 # PROCESO PRINCIPAL
 # =========================================================
+def asegurar_bd_descargada(db_path):
+    """En CI el checkout deja la BD como puntero de Git LFS (~130 bytes); se
+    descarga solo cuando hay datos que cargar, para no gastar ancho de banda."""
+    if not Path(db_path).exists():
+        return
+    with open(db_path, "rb") as f:
+        if f.read(40).startswith(b"version https://git-lfs"):
+            print("  Descargando la base de datos desde Git LFS...")
+            subprocess.run(["git", "lfs", "pull", "--include", str(db_path)], check=True)
+
+
 def procesar(disp_path, adj_path, db_path):
+    asegurar_bd_descargada(db_path)
     print(f"\n{'='*60}")
     print(f"  Disponibles:    {disp_path.name}")
     print(f"  Adjudicaciones: {adj_path.name}")

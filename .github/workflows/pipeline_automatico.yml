@@ -50,13 +50,19 @@ jobs:
   pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # La BD (~160 MB) NO se descarga en el checkout: solo se baja de LFS
+      # cuando hay datos nuevos que cargar (ver asegurar_bd_descargada en
+      # 4_Cargador_Semanal.py). Evita gastar la cuota de ancho de banda de
+      # LFS en cada disparo del cron.
+      GIT_LFS_SKIP_SMUDGE: "1"
 
     steps:
       - name: Checkout rama de prueba (automation-test)
         uses: actions/checkout@v4
         with:
           ref: automation-test
-          lfs: true
+          lfs: false
 
       - name: Configurar Git LFS
         run: git lfs install
