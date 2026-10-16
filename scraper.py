@@ -82,7 +82,7 @@ def obtener_adjudicaciones_portada() -> list[dict]:
 
     adjudicaciones = []
     patron = re.compile(
-        r"adjudicaci[oó]n.{0,10}d[ií]a.{0,5}(\d{1,2}/\d{1,2}/\d{4})",
+        r"adjudicaci[oó]n.{0,10}d[ií]a\D{0,5}(\d{1,2}/\d{1,2}/\d{4})",
         re.IGNORECASE
     )
 
