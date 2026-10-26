@@ -1,28 +1,26 @@
-name: Pipeline Automatico CLM (prueba)
+name: Pipeline Automatico CLM
 
 # ─────────────────────────────────────────────────────────────────────────
-# Este workflow ejecuta el pipeline completo (scraper + parsers + carga)
-# dentro del runner de GitHub Actions y, si hay datos nuevos, comitea la BD
-# actualizada a la rama TARGET_BRANCH (ver `env` justo debajo).
-#
-# MODO PRUEBA (estado actual): TARGET_BRANCH=automation-test y
-# NOTIFICAR="false". Comitea a una rama que Render NUNCA despliega y no envía
-# ninguna notificación, así que producción no corre ningún riesgo.
+# MODO PRODUCCIÓN (activo desde 2026-10-27).
+# Ejecuta el pipeline completo (scraper + parsers + carga) en el runner de
+# GitHub Actions y, si hay datos nuevos, comitea la BD actualizada a `main`
+# (Render redespliega solo) y avisa a la app cuando la API ya sirve la fecha
+# nueva (notificar.py).
 #
 # El disparo lo hace cron-job.org (jueves cada hora, viernes cada 15 min)
 # llamando a la API de workflow_dispatch; el `schedule:` de GitHub queda como
 # respaldo (GitHub lo retrasa o se lo salta con frecuencia).
 #
-# PARA PASAR A PRODUCCIÓN (todos los pasos son necesarios):
-#   1. Copiar `estado_scraper.json` de automation-test a main (comiteado).
-#      Sin él, el primer disparo tomaría por nuevos los PDFs que ya cargaste
-#      a mano y los volvería a añadir a las tablas acumulativas.
-#   2. Crear el secreto FIREBASE_SERVICE_ACCOUNT_JSON en
-#      Settings > Secrets and variables > Actions (el mismo JSON que en Render).
-#   3. Cambiar abajo TARGET_BRANCH a "main" y NOTIFICAR a "true".
-#   4. Acordar que las cargas manuales pasan a ser solo de respaldo, y hacer
-#      `git pull` antes de cualquiera: cargar a mano encima de una BD ya
-#      cargada por el pipeline duplica filas en las tablas acumulativas.
+# NORMAS DE USO EN PRODUCCIÓN:
+#   - NO lanzar a mano con force=true: recarga la semana y vuelve a avisar a
+#     todos los usuarios. Un lanzamiento manual normal es seguro: sin novedades
+#     no cambia nada.
+#   - Las cargas manuales pasan a ser solo de respaldo, y siempre `git pull`
+#     antes. Cargar la misma fecha dos veces ya no duplica filas, pero el push
+#     chocaría con el del pipeline si se cruzan.
+#   - Si algo va mal, las ejecuciones salen en rojo y no tocan la BD; para volver
+#     al modo prueba basta con TARGET_BRANCH=automation-test y NOTIFICAR="false".
+#   - Cada actualizacion es un commit: se deshace con `git revert`.
 # ─────────────────────────────────────────────────────────────────────────
 
 on:
@@ -41,8 +39,8 @@ on:
           - "true"
 
 env:
-  TARGET_BRANCH: automation-test
-  NOTIFICAR: "false"
+  TARGET_BRANCH: main
+  NOTIFICAR: "true"
 
 permissions:
   contents: write
