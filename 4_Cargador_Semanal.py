@@ -71,6 +71,20 @@ def semana_iso(fecha_str):
         return None
 
 
+def borrar_carga_previa(conn, tabla, condicion, params):
+    """Hace la carga idempotente: si esa fecha ya estaba cargada (por el pipeline
+    o a mano), elimina sus filas antes de insertarlas de nuevo para no duplicarlas.
+    Solo toca las filas de esa fecha."""
+    existe = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tabla,)
+    ).fetchone()
+    if not existe:
+        return
+    n = conn.execute(f"DELETE FROM {tabla} WHERE {condicion}", params).rowcount
+    if n:
+        print(f"  ↺ {n} filas previas de esa fecha eliminadas de {tabla} (recarga)")
+
+
 def formatear_cod_especialidad(cod, cod_cuerpo=None):
     """
     Devuelve el código de especialidad siempre con 3 dígitos (ej: 1 → '001', 36 → '036').
@@ -148,6 +162,7 @@ def volcar_disponibles(conn, df_disp, fecha_raw, semana, fuente):
             'fuente_pdf':           fuente,
             'fecha_carga':          datetime.now().isoformat(timespec='seconds'),
         })
+    borrar_carga_previa(conn, TABLA_DISP, "fecha = ?", (fecha_raw,))
     pd.DataFrame(filas).to_sql(TABLA_DISP, conn, if_exists='append', index=False)
     print(f"  ✓ {len(filas)} filas insertadas en {TABLA_DISP}")
 
@@ -184,6 +199,8 @@ def volcar_adjudicaciones(conn, df_adj, semana, fuente):
             'fuente_pdf':           fuente,
             'fecha_carga':          datetime.now().isoformat(timespec='seconds'),
         })
+    for fecha in sorted({f['fecha_adjudicacion'] for f in filas if f['fecha_adjudicacion']}):
+        borrar_carga_previa(conn, TABLA_ADJ, "tipo = 'SEMANAL' AND fecha_adjudicacion = ?", (fecha,))
     pd.DataFrame(filas).to_sql(TABLA_ADJ, conn, if_exists='append', index=False)
     print(f"  ✓ {len(filas)} filas insertadas en {TABLA_ADJ}")
 
