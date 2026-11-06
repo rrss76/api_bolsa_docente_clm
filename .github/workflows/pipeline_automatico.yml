@@ -53,7 +53,9 @@ concurrency:
 
 jobs:
   pipeline:
-    runs-on: ubuntu-latest
+    # Fijado a 24.04: `ubuntu-latest` pasó a 26.04, que no tiene Python 3.11.9
+    # (actions/setup-python fallaba y todos los disparos salían en rojo).
+    runs-on: ubuntu-24.04
     # Margen para la espera a que Render despliegue antes de notificar.
     timeout-minutes: 35
     env:
