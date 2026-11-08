@@ -174,7 +174,9 @@ def parse_page(page, estado: dict) -> list[dict]:
             estado["especialidad"]     = clean(m_esp.group(2))
             continue
 
-        if is_cabecera(fila):
+        # Una fila de datos nunca es cabecera aunque el nombre contenga un
+        # token de cabecera (p. ej. apellidos CASTILLA, PORTAL, MANCHA...).
+        if is_cabecera(fila) and not is_data_row(fila):
             continue
 
         if not is_data_row(fila):
