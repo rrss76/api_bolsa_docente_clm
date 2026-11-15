@@ -15,6 +15,7 @@ import sys
 import threading
 import logging
 import gc
+import functools
 
 app = FastAPI(title="API Interinos CLM")
 
@@ -25,6 +26,40 @@ ANIO_BOLSA = "2026"
 
 # Tabla de disponibles semanales
 TABLA_DISPONIBLES_SEMANALES = "disponibles_semanales_2026_2027"
+
+# ─────────────────────────────────────────────
+# CONTROL DE MEMORIA (Render: 512 MB)
+# ─────────────────────────────────────────────
+# Los endpoints que cargan tablas en pandas pueden gastar decenas de MB cada
+# uno. La app lanza varias peticiones a la vez por usuario, y FastAPI ejecuta
+# los endpoints síncronos en hasta 40 hilos, así que unos pocos usuarios
+# simultáneos sumaban cientos de MB y Render mataba la instancia (OOM).
+# Este semáforo hace que solo unos pocos endpoints pesados corran a la vez; el
+# resto espera en cola (ms) en vez de tumbar el servidor. Ajustable con la
+# variable de entorno MAX_PESADOS.
+_SEM_PESADOS = threading.BoundedSemaphore(max(1, int(os.getenv("MAX_PESADOS", "3"))))
+
+
+def _liberar_memoria():
+    """Recoge basura y devuelve a Linux la memoria libre del heap (glibc)."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass  # Windows/macOS u otra libc: no pasa nada
+
+
+def limitar_pesado(fn):
+    """Decorador: limita la concurrencia del endpoint y libera memoria al acabar."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _SEM_PESADOS:
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _liberar_memoria()
+    return wrapper
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,6 +220,24 @@ def _add_nombre_normalizado(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Columnas que realmente usa /posicion_en_fecha. Las tablas interinos_* y
+# bolsas_* traen 19-28 columnas (rutas de PDF, fechas de carga, puntos...) que
+# aquí no se usan y multiplicaban la memoria de cada petición.
+_COLS_POSICION_EN_FECHA = (
+    "nombre", "nombre_normalizado", "cuerpo", "orden_bolsa",
+    "tipo_bolsa", "tipo_bolsa_fuente",
+    "codigo_especialidad", "especialidades", "provincias",
+    "aleman", "frances", "ingles", "italiano", "leng_signos",
+)
+
+
+def _leer_tabla_columnas(conn, tabla: str, columnas) -> pd.DataFrame:
+    """SELECT solo de las columnas pedidas que existan en la tabla (esquemas antiguos y nuevos)."""
+    existentes = [r[1] for r in conn.execute(f"PRAGMA table_info({tabla})").fetchall()]
+    usar = [c for c in columnas if c in existentes] or existentes
+    return pd.read_sql_query(f"SELECT {', '.join(usar)} FROM {tabla}", conn)
+
+
 def _nombre_tabla_interinos(fecha_str: str) -> str:
     """
     Dado 'YYYY-MM-DD' devuelve el nombre de tabla interinos_YYYYMMDD.
@@ -327,6 +380,7 @@ def get_nombres_normalizados():
 
 
 @app.get("/adjudicaciones")
+@limitar_pesado
 def obtener_adjudicaciones(nombre: str, dni: str = Query(None, description="DNI ofuscado para identificar unívocamente al interino")):
     """Devuelve todas las adjudicaciones que contienen el nombre indicado (todos los cursos)."""
     with sqlite3.connect(DB_PATH) as conn:
@@ -494,6 +548,7 @@ def ceses_previstos(desde: str = Query(...), hasta: str = Query(...)):
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_inicial")
+@limitar_pesado
 def posicion_inicial(
     nombre: str = Query(..., description="Parte del nombre del interino")
 ):
@@ -578,6 +633,7 @@ def posicion_inicial(
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_disponibles")
+@limitar_pesado
 def posicion_disponibles(nombre: str = Query(..., description="Nombre del interino")):
     """Posición del interino en la bolsa inicial, desglosada por provincia."""
     nombre = normalizar_nombre(nombre)
@@ -632,6 +688,7 @@ def posicion_disponibles(nombre: str = Query(..., description="Nombre del interi
 
 
 @app.get("/posicion_disponibles_especialidad")
+@limitar_pesado
 def posicion_disponibles_especialidad(
     nombre: str = Query(..., description="Nombre del interino"),
     especialidad: str = Query(..., description="Código de especialidad a filtrar (ej. 031)")
@@ -707,6 +764,7 @@ def posicion_disponibles_especialidad(
 # ─────────────────────────────────────────────
 
 @app.get("/posicion_en_fecha")
+@limitar_pesado
 def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: str = Query(None)):
     """
     Devuelve la posición de un interino en una fecha concreta.
@@ -741,7 +799,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
                         break
                 if tabla_persona is None:
                     raise HTTPException(status_code=404, detail="Interino no encontrado en la bolsa inicial.")
-                df = pd.read_sql_query(f"SELECT * FROM {tabla_persona}", conn)
+                df = _leer_tabla_columnas(conn, tabla_persona, _COLS_POSICION_EN_FECHA)
             else:
                 chk = pd.read_sql_query(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
@@ -749,7 +807,7 @@ def posicion_en_fecha(nombre: str = Query(...), fecha: str = Query(...), anio: s
                 )
                 if chk.empty:
                     raise HTTPException(status_code=404, detail=f"No existe datos para la fecha '{fecha}'.")
-                df = pd.read_sql_query(f"SELECT * FROM {tabla}", conn)
+                df = _leer_tabla_columnas(conn, tabla, _COLS_POSICION_EN_FECHA)
 
         if df.empty:
             raise HTTPException(status_code=404, detail="No se encontraron datos para la fecha indicada.")
